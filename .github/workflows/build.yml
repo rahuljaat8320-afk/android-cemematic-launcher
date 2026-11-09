@@ -39,7 +39,7 @@ jobs:
                   release {
                       isMinifyEnabled = true
                       isShrinkResources = true
-                      signingConfig = signingConfigs.getByName("debug") // fine for sideloading
+                      signingConfig = signingConfigs.getByName("debug")
                   }
               }
               compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
@@ -63,7 +63,7 @@ jobs:
               <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
               <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
               <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-              <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+              <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
 
               <queries>
                   <intent>
@@ -109,6 +109,113 @@ jobs:
                   </activity>
               </application>
           </manifest>
+          CINE_EOF
+          mkdir -p app/src/main/java/com/cine/launcher
+          cat > app/src/main/java/com/cine/launcher/Prefs.kt <<'CINE_EOF'
+          package com.cine.launcher
+
+          import android.content.Context
+          import org.json.JSONArray
+          import org.json.JSONObject
+
+          class Look {
+              var radius = 18
+              var scale = 1.13f
+              var sheen = true
+              var labels = 0
+              var anim = true
+              var glassMode = false
+          }
+
+          class Opt(val key: String, val title: String, val choices: List<String>, val def: Int)
+
+          val OPTS = listOf(
+              Opt("accent", "Glow color", listOf("Auto (Wallpaper/Icon)", "Blue", "Purple", "Red", "Green", "Orange", "Pink", "Teal"), 0),
+              Opt("bg", "Background Mode", listOf("Aurora Gradient", "Solid Dark", "Pure Black", "Custom Wallpaper"), 0),
+              Opt("aurora_blend", "Aurora Overlay", listOf("Off", "Blend with Background"), 1),
+              Opt("glass", "Glass Mode (Translucency)", listOf("Off", "Enabled (70%-80% Glass)"), 0),
+              Opt("layout", "Layout Style", listOf("Top row + apps", "Two rows", "Single row"), 0),
+              Opt("toprow", "Top row content", listOf("Recent apps", "Off"), 0),
+              Opt("stats", "System Stats (CPU/RAM/GPU)", listOf("Show", "Hide"), 0),
+              Opt("size", "Tile Size", listOf("Small", "Medium", "Large"), 1),
+              Opt("count", "Tiles per row", listOf("4", "6", "8", "10", "12"), 2),
+              Opt("corner", "Tile Shape / Corners", listOf("Square", "Rounded", "Round"), 1),
+              Opt("focus", "Focus Zoom", listOf("Subtle", "Normal", "Big"), 1),
+              Opt("sheen", "Focus Shine", listOf("On", "Off"), 0),
+              Opt("labels", "App Labels", listOf("On focus", "Always", "Hidden"), 0),
+              Opt("sort", "Sort order", listOf("A to Z", "Z to A"), 0),
+              Opt("clock", "Header greeting", listOf("Show", "Hide"), 0),
+              Opt("greet", "Greeting text", listOf("Show", "Hide"), 0),
+              Opt("anim", "Animations", listOf("On", "Off"), 0)
+          )
+
+          class Store(ctx: Context) {
+              private val sp = ctx.getSharedPreferences("cine", Context.MODE_PRIVATE)
+
+              var cur: String
+                  get() = sp.getString("cur", "p1") ?: "p1"
+                  set(v) { sp.edit().putString("cur", v).apply() }
+
+              fun profiles(): JSONArray {
+                  val s = sp.getString("profiles", null)
+                  if (s == null) {
+                      val a = JSONArray().put(JSONObject().put("id", "p1").put("name", "Me").put("email", ""))
+                      saveProfiles(a)
+                      return a
+                  }
+                  return JSONArray(s)
+              }
+
+              fun saveProfiles(a: JSONArray) { sp.edit().putString("profiles", a.toString()).apply() }
+
+              fun profile(): JSONObject {
+                  val a = profiles()
+                  for (i in 0 until a.length()) if (a.getJSONObject(i).getString("id") == cur) return a.getJSONObject(i)
+                  return a.getJSONObject(0)
+              }
+
+              fun update(f: (JSONObject) -> Unit) {
+                  val id = profile().getString("id")
+                  val a = profiles()
+                  for (i in 0 until a.length()) {
+                      val o = a.getJSONObject(i)
+                      if (o.getString("id") == id) f(o)
+                  }
+                  saveProfiles(a)
+              }
+
+              fun addProfile(name: String) {
+                  val a = profiles()
+                  val id = "p" + System.currentTimeMillis()
+                  a.put(JSONObject().put("id", id).put("name", name).put("email", ""))
+                  saveProfiles(a)
+                  cur = id
+              }
+
+              fun deleteCurrent() {
+                  val a = profiles()
+                  if (a.length() < 2) return
+                  val id = profile().getString("id")
+                  val n = JSONArray()
+                  for (i in 0 until a.length()) {
+                      val o = a.getJSONObject(i)
+                      if (o.getString("id") != id) n.put(o)
+                  }
+                  saveProfiles(n)
+                  cur = n.getJSONObject(0).getString("id")
+              }
+
+              fun get(k: String, d: String): String = sp.getString(profile().getString("id") + "." + k, d) ?: d
+              fun put(k: String, v: String) { sp.edit().putString(profile().getString("id") + "." + k, v).apply() }
+              fun gget(k: String): String = sp.getString("g." + k, "") ?: ""
+              fun gput(k: String, v: String) { sp.edit().putString("g." + k, v).apply() }
+              fun list(k: String): List<String> = get(k, "").split(",").filter { it.isNotEmpty() }
+
+              fun sel(key: String): Int {
+                  val o = OPTS.firstOrNull { it.key == key } ?: return 0
+                  return (get(key, o.def.toString()).toIntOrNull() ?: o.def).coerceIn(0, o.choices.size - 1)
+              }
+          }
           CINE_EOF
           mkdir -p app/src/main/java/com/cine/launcher
           cat > app/src/main/java/com/cine/launcher/AppAdapter.kt <<'CINE_EOF'
@@ -166,6 +273,9 @@ jobs:
                   fun dp(v: Int) = (v * d).toInt()
                   val radius = dp(look.radius).toFloat()
 
+                  val cardBgStart = if (look.glassMode) 0xB01C2233.toInt() else 0xFF262C3D.toInt()
+                  val cardBgEnd = if (look.glassMode) 0x80141824.toInt() else 0xFF141824.toInt()
+
                   val root = LinearLayout(c).apply {
                       orientation = LinearLayout.VERTICAL
                       gravity = Gravity.CENTER_HORIZONTAL
@@ -175,7 +285,7 @@ jobs:
                   val card = FrameLayout(c).apply {
                       layoutParams = LinearLayout.LayoutParams(dp(cw), dp(ch))
                       background = GradientDrawable(
-                          GradientDrawable.Orientation.TL_BR, intArrayOf(0xFF262C3D.toInt(), 0xFF141824.toInt())
+                          GradientDrawable.Orientation.TL_BR, intArrayOf(cardBgStart, cardBgEnd)
                       ).apply { cornerRadius = radius }
                       outlineProvider = object : ViewOutlineProvider() {
                           override fun getOutline(v: View, o: Outline) { o.setRoundRect(0, 0, v.width, v.height, radius) }
@@ -265,8 +375,6 @@ jobs:
           import org.json.JSONArray
           import org.json.JSONObject
           import java.io.File
-          import java.net.HttpURLConnection
-          import java.net.URL
           import android.accounts.AccountManager
           import android.animation.ArgbEvaluator
           import android.animation.ValueAnimator
@@ -278,7 +386,6 @@ jobs:
           import android.content.Intent
           import android.content.IntentFilter
           import android.content.pm.PackageManager
-          import android.content.res.Resources
           import android.graphics.Bitmap
           import android.graphics.Canvas
           import android.graphics.Color
@@ -290,8 +397,6 @@ jobs:
           import android.graphics.drawable.StateListDrawable
           import android.media.AudioDeviceInfo
           import android.media.AudioManager
-          import android.media.tv.TvContract
-          import android.media.tv.TvInputManager
           import android.net.Uri
           import android.net.wifi.WifiManager
           import android.os.Build
@@ -299,17 +404,15 @@ jobs:
           import android.os.Handler
           import android.os.Looper
           import android.provider.Settings
-          import android.text.SpannableString
-          import android.text.Spanned
           import android.text.TextUtils
           import android.text.format.DateFormat
-          import android.text.style.ForegroundColorSpan
           import android.util.StateSet
           import android.view.Gravity
           import android.view.View
           import android.view.ViewGroup
           import android.widget.EditText
           import android.widget.FrameLayout
+          import android.widget.ImageView
           import android.widget.LinearLayout
           import android.widget.ScrollView
           import android.widget.TextView
@@ -322,8 +425,6 @@ jobs:
           import java.util.Date
           import java.util.Locale
           import java.util.concurrent.Executors
-
-          class RecRaw(val id: Int, val mt: String, val title: String, val rating: Double, val img: String, val badge: String)
 
           class MI(val label: String, val value: (() -> String)? = null, val keep: Boolean = false, val run: () -> Unit)
 
@@ -343,8 +444,10 @@ jobs:
               private lateinit var chipAvatar: TextView
               private lateinit var chipName: TextView
               private lateinit var chipMail: TextView
-              private lateinit var wifiPill: TextView
-              private lateinit var btPill: TextView
+              private lateinit var wifiPill: View
+              private lateinit var btPill: View
+              private lateinit var wifiStatusTv: TextView
+              private lateinit var btStatusTv: TextView
               private lateinit var rowR: RecyclerView
               private lateinit var row1: RecyclerView
               private lateinit var row2: RecyclerView
@@ -354,35 +457,20 @@ jobs:
               private lateinit var glowA: GradientDrawable
               private lateinit var glowB: GradientDrawable
               private lateinit var baseBg: ColorDrawable
+              private lateinit var bgImageView: ImageView
               private lateinit var statsBox: LinearLayout
-              private lateinit var detBox: LinearLayout
-              private lateinit var detTitle: TextView
-              private lateinit var detMeta: TextView
-              private lateinit var detOver: TextView
               private lateinit var cpuTv: TextView
               private lateinit var cpuBar: ProgressBar
               private lateinit var ramTv: TextView
               private lateinit var ramBar: ProgressBar
               private lateinit var gpuTv: TextView
               private lateinit var gpuBar: ProgressBar
-              private var recs: List<AppItem> = emptyList()
-              private var recState = 0
-              private var recTime = 0L
-              private var focusPending = true
               private var prevTotal = 0L
               private var prevIdle = 0L
               private var cpuApprox = false
               private var gpuApprox = false
-              private val net = Executors.newSingleThreadExecutor()
               private val statsTick = object : Runnable { override fun run() { updateStats(); handler.postDelayed(this, 2000) } }
-              private val carousel = object : Runnable { override fun run() { advanceRecs(); handler.postDelayed(this, 6000) } }
-              private val moctale by lazy {
-                  AppItem("Moctale · Indian movie picks", "rec:moctale",
-                      Intent(Intent.ACTION_VIEW, Uri.parse("https://moctale.in")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                      textTile("Moctale", 0xFF6D28D9.toInt()), true, 0xFF6D28D9.toInt(), false, "OPEN SITE",
-                      "Moctale  ·  Indian movie and series community",
-                      "India-focused reviews, clubs and watchlists, with its own Moctale Meter (Skip, Time Pass, Go for It, Perfection). Press OK to open moctale.in.")
-              }
+              private var focusPending = true
 
               private val handler = Handler(Looper.getMainLooper())
               private val io = Executors.newSingleThreadExecutor()
@@ -421,48 +509,92 @@ jobs:
                   glowA = glow(0.18f, 0.05f, dm.widthPixels * 0.8f)
                   glowB = glow(0.95f, 0.6f, dm.widthPixels * 0.6f)
                   baseBg = ColorDrawable(0xFF05060B.toInt())
-                  root = FrameLayout(this).apply { background = LayerDrawable(arrayOf(baseBg, glowA, glowB)) }
+                  
+                  bgImageView = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP }
+                  root = FrameLayout(this).apply {
+                      addView(bgImageView, FrameLayout.LayoutParams(-1, -1))
+                      background = LayerDrawable(arrayOf(baseBg, glowA, glowB))
+                  }
                   content = FrameLayout(this).apply { clipChildren = false }
                   root.addView(content, FrameLayout.LayoutParams(-1, -1))
-                  buildTop()
-                  buildHero()
+                  
+                  buildTopBarAndClock()
+                  buildHeroAndStats()
                   buildRows()
                   setContentView(root)
                   applyLook()
               }
 
-              // ---------- UI building ----------
-              private fun pillBg(r: Int) = StateListDrawable().apply {
-                  addState(intArrayOf(android.R.attr.state_focused), GradientDrawable().apply { setColor(0x66FFFFFF); cornerRadius = dp(r).toFloat() })
-                  addState(StateSet.WILD_CARD, GradientDrawable().apply { setColor(0x22FFFFFF); cornerRadius = dp(r).toFloat() })
+              private fun pillBg(r: Int): Drawable {
+                  val focusColor = if (look.glassMode) 0x77FFFFFF else 0x66FFFFFF
+                  val normalColor = if (look.glassMode) 0x60202636.toInt() else 0x22FFFFFF
+                  return StateListDrawable().apply {
+                      addState(intArrayOf(android.R.attr.state_focused), GradientDrawable().apply { setColor(focusColor); cornerRadius = dp(r).toFloat() })
+                      addState(StateSet.WILD_CARD, GradientDrawable().apply { setColor(normalColor); cornerRadius = dp(r).toFloat() })
+                  }
               }
 
               private fun zoomOnFocus(v: View) {
-                  v.setOnFocusChangeListener { view, f -> view.animate().scaleX(if (f) 1.08f else 1f).scaleY(if (f) 1.08f else 1f).setDuration(120).start() }
+                  v.setOnFocusChangeListener { view, f -> 
+                      view.animate().scaleX(if (f) 1.08f else 1f).scaleY(if (f) 1.08f else 1f).setDuration(120).start() 
+                  }
               }
 
-              private fun pill(label: String, onLong: (() -> Unit)? = null, click: () -> Unit): TextView {
-                  val t = TextView(this)
-                  t.text = label
-                  t.setTextColor(Color.WHITE)
-                  t.textSize = 13f
-                  t.gravity = Gravity.CENTER
-                  t.setPadding(dp(14), dp(8), dp(14), dp(8))
-                  t.isFocusable = true
-                  t.background = pillBg(20)
+              // Logo-based toggle pill for Wi-Fi and Bluetooth
+              private fun logoPill(isWifi: Boolean, labelText: String, onLong: (() -> Unit)? = null, click: () -> Unit): View {
+                  val container = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                      setPadding(dp(12), dp(6), dp(14), dp(6))
+                      isFocusable = true
+                      background = pillBg(20)
+                  }
+                  zoomOnFocus(container)
+                  container.setOnClickListener { click() }
+                  if (onLong != null) container.setOnLongClickListener { onLong(); true }
+
+                  val iconView = ImageView(this).apply {
+                      layoutParams = LinearLayout.LayoutParams(dp(20), dp(20))
+                      setColorFilter(Color.WHITE)
+                      setImageResource(if (isWifi) android.R.drawable.ic_menu_upload else android.R.drawable.ic_menu_manage)
+                  }
+                  val tv = TextView(this).apply {
+                      text = labelText
+                      setTextColor(Color.WHITE)
+                      textSize = 13f
+                      setPadding(dp(8), 0, 0, 0)
+                  }
+                  if (isWifi) wifiStatusTv = tv else btStatusTv = tv
+                  container.addView(iconView)
+                  container.addView(tv)
+                  return container
+              }
+
+              private fun textPill(label: String, onLong: (() -> Unit)? = null, click: () -> Unit): TextView {
+                  val t = TextView(this).apply {
+                      text = label
+                      setTextColor(Color.WHITE)
+                      textSize = 13f
+                      gravity = Gravity.CENTER
+                      setPadding(dp(14), dp(8), dp(14), dp(8))
+                      isFocusable = true
+                      background = pillBg(20)
+                  }
                   zoomOnFocus(t)
                   t.setOnClickListener { click() }
                   if (onLong != null) t.setOnLongClickListener { onLong(); true }
                   return t
               }
 
-              private fun buildTop() {
+              private fun buildTopBarAndClock() {
                   val bar = LinearLayout(this).apply {
                       orientation = LinearLayout.HORIZONTAL
                       gravity = Gravity.CENTER_VERTICAL
                       clipChildren = false
                       setPadding(dp(64), dp(22), dp(64), 0)
                   }
+                  
+                  // Left Side Profile Chip
                   val chip = LinearLayout(this).apply {
                       orientation = LinearLayout.HORIZONTAL
                       gravity = Gravity.CENTER_VERTICAL
@@ -489,1138 +621,61 @@ jobs:
                   chip.addView(chipAvatar, LinearLayout.LayoutParams(dp(36), dp(36)))
                   chip.addView(col)
                   bar.addView(chip)
+
+                  // Left-aligned Quick Settings Toggles (Wi-Fi, Bluetooth, Audio, Video, Customize)
+                  wifiPill = logoPill(true, "Wi-Fi") { toggleWifi() }
+                  btPill = logoPill(false, "Bluetooth") { toggleBt() }
+                  val audioPill = textPill("Audio", { pickSettingsPage("audio") }) { openShortcut("audio") }
+                  val videoPill = textPill("Video", { pickSettingsPage("video") }) { openShortcut("video") }
+                  val customPill = textPill("Customize") { customize() }
+
+                  val leftToggles = listOf(wifiPill, btPill, audioPill, videoPill, customPill)
+                  for (p in leftToggles) {
+                      bar.addView(p, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(10) })
+                  }
+
+                  // Spacer pushing Time and Date to the RIGHT corner
                   bar.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
 
-                  wifiPill = pill("Wi-Fi") { toggleWifi() }
-                  btPill = pill("Bluetooth") { toggleBt() }
-                  val pills = listOf(
-                      wifiPill, btPill,
-                      pill("Audio", { pickSettingsPage("audio") }) { openShortcut("audio") },
-                      pill("Video", { pickSettingsPage("video") }) { openShortcut("video") },
-                      pill("Quick") { quickMenu() },
-                      pill("Customize") { customize() }
-                  )
-                  for (p in pills) bar.addView(p, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(8) })
+                  // Right-corner Time and Date Block
+                  val rightCornerLayout = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      gravity = Gravity.END
+                  }
+                  clock = TextView(this).apply {
+                      setTextColor(Color.WHITE)
+                      textSize = 22f
+                      typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
+                      gravity = Gravity.END
+                  }
+                  date = TextView(this).apply {
+                      setTextColor(0x99FFFFFF.toInt())
+                      textSize = 12f
+                      gravity = Gravity.END
+                  }
+                  rightCornerLayout.addView(clock)
+                  rightCornerLayout.addView(date)
+                  bar.addView(rightCornerLayout)
+
                   content.addView(bar, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
               }
 
-              private fun buildHero() {
+              private fun buildHeroAndStats() {
                   val hero = LinearLayout(this).apply {
-                      orientation = LinearLayout.HORIZONTAL
-                      gravity = Gravity.CENTER_VERTICAL
-                      setPadding(dp(64), dp(78), 0, 0)
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(dp(64), dp(84), 0, 0)
                   }
-                  clock = TextView(this).apply {
-                      setTextColor(Color.WHITE); textSize = 34f
-                      typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
-                  }
-                  val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(14), 0, 0, 0) }
-                  greeting = TextView(this).apply { setTextColor(Color.WHITE); textSize = 15f; typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL) }
-                  date = TextView(this).apply { setTextColor(0x99FFFFFF.toInt()); textSize = 13f }
-                  col.addView(greeting); col.addView(date)
-                  hero.addView(clock); hero.addView(col)
+                  greeting = TextView(this).apply { setTextColor(Color.WHITE); textSize = 16f; typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL) }
+                  hero.addView(greeting)
                   heroBox = hero
                   content.addView(hero, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.START))
 
+                  // CPU, RAM, GPU System Stats Tile
                   cpuTv = statTv(); ramTv = statTv(); gpuTv = statTv()
                   cpuBar = statBar(0xFF60A5FA.toInt()); ramBar = statBar(0xFFA78BFA.toInt()); gpuBar = statBar(0xFF34D399.toInt())
                   statsBox = LinearLayout(this).apply {
                       orientation = LinearLayout.HORIZONTAL
-                      setPadding(dp(8), dp(8), dp(8), dp(8))
-                      background = GradientDrawable().apply { setColor(0x26FFFFFF); cornerRadius = dp(12).toFloat() }
-                  }
-                  statsBox.addView(statCol(cpuTv, cpuBar)); statsBox.addView(statCol(ramTv, ramBar)); statsBox.addView(statCol(gpuTv, gpuBar))
-                  content.addView(statsBox, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END).apply { topMargin = dp(74); marginEnd = dp(64) })
-
-                  detTitle = TextView(this).apply {
-                      setTextColor(Color.WHITE); textSize = 18f; maxLines = 1; ellipsize = TextUtils.TruncateAt.END
-                      typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-                  }
-                  detMeta = TextView(this).apply { setTextColor(0xFF9DB4FF.toInt()); textSize = 12f; maxLines = 1; ellipsize = TextUtils.TruncateAt.END }
-                  detOver = TextView(this).apply { setTextColor(0xCCFFFFFF.toInt()); textSize = 11f; maxLines = 2; ellipsize = TextUtils.TruncateAt.END }
-                  detBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; visibility = View.GONE }
-                  detBox.addView(detTitle); detBox.addView(detMeta); detBox.addView(detOver)
-                  val detW = resources.displayMetrics.widthPixels - dp(64) - dp(360)
-                  content.addView(detBox, FrameLayout.LayoutParams(detW, -2, Gravity.TOP or Gravity.START).apply { topMargin = dp(76); marginStart = dp(64) })
-              }
-
-              private fun buildRows() {
-                  val onFocus: (AppItem) -> Unit = { app -> applyTint(accents[store.sel("accent")] ?: app.tint ?: defaultTint); showDetails(app) }
-                  val onOpen: (AppItem) -> Unit = { app -> openApp(app) }
-                  val onMenu: (AppItem) -> Unit = { app -> appMenu(app) }
-                  aR = AppAdapter(look, onFocus, onOpen, onMenu)
-                  a1 = AppAdapter(look, onFocus, onOpen, onMenu)
-                  a2 = AppAdapter(look, onFocus, onOpen, onMenu)
-                  fun rowOf(a: AppAdapter) = RecyclerView(this).apply {
-                      layoutManager = LinearLayoutManager(this@MainActivity, RecyclerView.HORIZONTAL, false)
-                      adapter = a
-                      clipToPadding = false
-                      clipChildren = false
-                      setPadding(dp(64), dp(14), dp(64), dp(14))
-                      overScrollMode = View.OVER_SCROLL_NEVER
-                      itemAnimator = null
-                  }
-                  rowR = rowOf(aR); row1 = rowOf(a1); row2 = rowOf(a2)
-                  val bottom = LinearLayout(this).apply {
-                      orientation = LinearLayout.VERTICAL
-                      clipChildren = false
-                      setPadding(0, 0, 0, dp(8))
-                  }
-                  bottom.addView(rowR, LinearLayout.LayoutParams(-1, -2))
-                  bottom.addView(row1, LinearLayout.LayoutParams(-1, -2))
-                  bottom.addView(row2, LinearLayout.LayoutParams(-1, -2))
-                  content.addView(bottom, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
-              }
-
-              // ---------- look & settings ----------
-              private fun applyLook() {
-                  look.radius = intArrayOf(4, 12, 22)[store.sel("corner")]
-                  look.scale = floatArrayOf(1.06f, 1.13f, 1.22f)[store.sel("focus")]
-                  look.sheen = store.sel("sheen") == 0
-                  look.labels = store.sel("labels")
-                  look.anim = store.sel("anim") == 0
-                  val sz = store.sel("size")
-                  val big = arrayOf(intArrayOf(176, 99), intArrayOf(208, 117), intArrayOf(248, 140))[sz]
-                  val small = arrayOf(intArrayOf(132, 74), intArrayOf(156, 88), intArrayOf(188, 106))[sz]
-                  aR.cw = small[0]; aR.ch = small[1]
-                  a1.cw = big[0]; a1.ch = big[1]
-                  a2.cw = small[0]; a2.ch = small[1]
-                  for ((r, a) in listOf(rowR to aR, row1 to a1, row2 to a2)) { r.adapter = null; r.adapter = a }
-                  heroBox.visibility = if (store.sel("clock") == 0) View.VISIBLE else View.GONE
-                  greeting.visibility = if (store.sel("greet") == 0) View.VISIBLE else View.GONE
-                  statsBox.visibility = if (store.sel("stats") == 0) View.VISIBLE else View.GONE
-                  bgMode = store.sel("bg")
-                  baseBg.color = if (bgMode == 2) Color.BLACK else 0xFF05060B.toInt()
-                  val fixed = accents[store.sel("accent")]
-                  if (fixed != null) applyTint(fixed) else paintGlow(curTint)
-                  updateTime()
-                  refreshProfile()
-                  render()
-              }
-
-              private fun refreshProfile() {
-                  val p = store.profile()
-                  val name = p.getString("name")
-                  val mail = p.optString("email")
-                  chipAvatar.text = name.take(1).uppercase()
-                  (chipAvatar.background as GradientDrawable).setColor(avatarColors[Math.abs(p.getString("id").hashCode()) % avatarColors.size])
-                  chipName.text = name
-                  chipMail.text = if (mail.isEmpty()) "No account linked" else mail
-              }
-
-              private fun paintGlow(c: Int) {
-                  if (bgMode != 0) {
-                      glowA.colors = intArrayOf(0, 0); glowB.colors = intArrayOf(0, 0)
-                      return
-                  }
-                  glowA.colors = intArrayOf((c and 0x00FFFFFF) or 0x77000000, 0x00000000)
-                  val hsv = FloatArray(3)
-                  Color.colorToHSV(c, hsv)
-                  hsv[0] = (hsv[0] + 50f) % 360f
-                  glowB.colors = intArrayOf((Color.HSVToColor(hsv) and 0x00FFFFFF) or 0x55000000, 0x00000000)
-              }
-
-              private fun applyTint(target: Int) {
-                  tintAnim?.cancel()
-                  if (!look.anim) { curTint = target; paintGlow(target); return }
-                  tintAnim = ValueAnimator.ofObject(ArgbEvaluator(), curTint, target).apply {
-                      duration = 400
-                      addUpdateListener { curTint = it.animatedValue as Int; paintGlow(curTint) }
-                      start()
-                  }
-              }
-
-              private fun tintOf(src: Drawable): Int? = try {
-                  val dd = src.constantState?.newDrawable()?.mutate() ?: src
-                  val bmp = Bitmap.createBitmap(12, 12, Bitmap.Config.ARGB_8888)
-                  dd.setBounds(0, 0, 12, 12)
-                  dd.draw(Canvas(bmp))
-                  var r = 0.0; var g = 0.0; var b = 0.0; var wSum = 0.0
-                  val hsv = FloatArray(3)
-                  for (x in 0 until 12) for (y in 0 until 12) {
-                      val px = bmp.getPixel(x, y)
-                      if (Color.alpha(px) < 128) continue
-                      Color.colorToHSV(px, hsv)
-                      val w = (hsv[1] * hsv[2]).toDouble() + 0.001
-                      r += Color.red(px) * w; g += Color.green(px) * w; b += Color.blue(px) * w; wSum += w
-                  }
-                  bmp.recycle()
-                  if (wSum <= 0.0) null else {
-                      val avg = Color.rgb((r / wSum).toInt(), (g / wSum).toInt(), (b / wSum).toInt())
-                      Color.colorToHSV(avg, hsv)
-                      if (hsv[1] < 0.2f) null else {
-                          hsv[1] = hsv[1].coerceAtLeast(0.55f)
-                          hsv[2] = hsv[2].coerceAtLeast(0.85f)
-                          Color.HSVToColor(hsv)
-                      }
-                  }
-              } catch (e: Exception) { null }
-
-              // ---------- app list ----------
-              private fun render() {
-                  val hidden = store.list("hidden")
-                  val rev = store.sel("sort") == 1
-                  fun s(l: List<AppItem>) = if (rev) l.sortedByDescending { it.label.lowercase() } else l.sortedBy { it.label.lowercase() }
-                  val vis = master.filter { it.pkg !in hidden }
-                  var list = s(vis.filter { it.lean }) + s(vis.filter { !it.lean })
-                  val ord = store.list("order")
-                  if (ord.isNotEmpty()) list = list.sortedBy { val i = ord.indexOf(it.pkg); if (i < 0) Int.MAX_VALUE else i }
-                  shown = list
-                  val n = intArrayOf(4, 6, 8, 10, 12)[store.sel("count")]
-                  when (store.sel("layout")) {
-                      0 -> {
-                          aR.items = when (store.sel("toprow")) {
-                              0 -> recTiles()
-                              1 -> store.list("recent").mapNotNull { p -> list.firstOrNull { it.pkg == p } }
-                              else -> emptyList()
-                          }
-                          a1.items = list; a2.items = emptyList()
-                      }
-                      1 -> { aR.items = emptyList(); a1.items = list.take(n); a2.items = list.drop(n) }
-                      else -> { aR.items = emptyList(); a1.items = list; a2.items = emptyList() }
-                  }
-                  aR.notifyDataSetChanged(); a1.notifyDataSetChanged(); a2.notifyDataSetChanged()
-                  rowR.visibility = if (aR.items.isEmpty()) View.GONE else View.VISIBLE
-                  row2.visibility = if (a2.items.isEmpty()) View.GONE else View.VISIBLE
-                  if (overlay == null) row1.post {
-                      if (focusPending || currentFocus == null) { if (row1.getChildAt(0)?.requestFocus() == true) focusPending = false }
-                  }
-              }
-
-              private fun loadApps() {
-                  io.execute {
-                      val pm = packageManager
-                      val seen = HashSet<String>()
-                      val result = ArrayList<AppItem>()
-                      fun add(cat: String, lean: Boolean) {
-                          val apps = pm.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(cat), 0)
-                              .filter { it.activityInfo.packageName != packageName }
-                          for (ri in apps) {
-                              val pkg = ri.activityInfo.packageName
-                              if (!seen.add(pkg)) continue
-                              val banner = ri.activityInfo.loadBanner(pm) ?: ri.activityInfo.applicationInfo.loadBanner(pm)
-                              val img = banner ?: ri.loadIcon(pm)
-                              val intent = Intent(Intent.ACTION_MAIN)
-                                  .setClassName(pkg, ri.activityInfo.name)
-                                  .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                              result.add(AppItem(ri.loadLabel(pm).toString(), pkg, intent, img, banner != null, tintOf(img), lean))
-                          }
-                      }
-                      add(Intent.CATEGORY_LEANBACK_LAUNCHER, true)
-                      add(Intent.CATEGORY_LAUNCHER, false)
-                      runOnUiThread { master = result; render() }
-                  }
-              }
-
-              private fun recordRecent(pk: String) {
-                  val l = listOf(pk) + store.list("recent").filter { it != pk }
-                  store.put("recent", l.take(8).joinToString(","))
-              }
-
-              private fun launchApp(a: AppItem) {
-                  try { startActivity(a.intent); recordRecent(a.pkg) } catch (e: Exception) { toast("Can't open " + a.label) }
-              }
-
-              private fun openApp(a: AppItem) {
-                  if (a.pkg.startsWith("rec:")) { openRec(a); return }
-                  val f = splitFirst
-                  splitFirst = null
-                  if (f != null && f.pkg != a.pkg) {
-                      try {
-                          startActivity(f.intent); recordRecent(f.pkg)
-                          handler.postDelayed({
-                              try {
-                                  startActivity(Intent(a.intent).addFlags(Intent.FLAG_ACTIVITY_LAUNCH_ADJACENT or Intent.FLAG_ACTIVITY_MULTIPLE_TASK))
-                                  recordRecent(a.pkg)
-                              } catch (e: Exception) { toast("Couldn't open the second app") }
-                          }, 900)
-                      } catch (e: Exception) { toast("Couldn't open the first app") }
-                  } else launchApp(a)
-              }
-
-              private fun splitSupported(): Boolean = try {
-                  val id = Resources.getSystem().getIdentifier("config_supportsSplitScreenMultiWindow", "bool", "android")
-                  id != 0 && Resources.getSystem().getBoolean(id)
-              } catch (e: Exception) { false }
-
-              private fun startSplit(a: AppItem) {
-                  if (!splitSupported()) { toast("This TV's system doesn't support split screen"); return }
-                  splitFirst = a
-                  toast("Now pick the second app")
-              }
-
-              private fun saveOrder(l: List<String>) { store.put("order", l.joinToString(",")); render() }
-
-              private fun move(pk: String, dir: Int) {
-                  val l = shown.map { it.pkg }.toMutableList()
-                  val i = l.indexOf(pk)
-                  val j = i + dir
-                  if (i < 0 || j < 0 || j >= l.size) return
-                  Collections.swap(l, i, j)
-                  saveOrder(l)
-              }
-
-              // ---------- menus ----------
-              private fun showMenu(title: String, items: List<MI>) {
-                  val old = overlay
-                  if (old == null) focusBefore = currentFocus else root.removeView(old)
-                  val panel = LinearLayout(this).apply {
-                      orientation = LinearLayout.VERTICAL
-                      setPadding(dp(20), dp(18), dp(20), dp(14))
-                      background = GradientDrawable().apply { setColor(0xF2121826.toInt()); cornerRadius = dp(18).toFloat() }
-                  }
-                  panel.addView(TextView(this).apply {
-                      text = title; setTextColor(Color.WHITE); textSize = 20f
-                      typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-                      setPadding(dp(8), 0, 0, dp(10))
-                  })
-                  val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-                  var first: View? = null
-                  for (mi in items) {
-                      val row = LinearLayout(this).apply {
-                          orientation = LinearLayout.HORIZONTAL
-                          gravity = Gravity.CENTER_VERTICAL
-                          setPadding(dp(14), 0, dp(14), 0)
-                          isFocusable = true
-                          background = pillBg(10)
-                      }
-                      val l = TextView(this).apply { text = mi.label; setTextColor(Color.WHITE); textSize = 16f; maxLines = 1 }
-                      val v = TextView(this).apply { text = mi.value?.invoke() ?: ""; setTextColor(0xFF9DB4FF.toInt()); textSize = 15f }
-                      row.addView(l, LinearLayout.LayoutParams(0, -2, 1f))
-                      row.addView(v)
-                      row.setOnClickListener {
-                          if (mi.keep) { mi.run(); v.text = mi.value?.invoke() ?: "" } else { closeMenu(); mi.run() }
-                      }
-                      list.addView(row, LinearLayout.LayoutParams(-1, dp(46)))
-                      if (first == null) first = row
-                  }
-                  val sv = ScrollView(this).apply { isVerticalScrollBarEnabled = false; addView(list) }
-                  panel.addView(sv, LinearLayout.LayoutParams(-1, minOf(dp(46) * items.size, dp(300))))
-                  val ov = FrameLayout(this).apply {
-                      setBackgroundColor(0xB3000000.toInt())
-                      isClickable = true
-                      addView(panel, FrameLayout.LayoutParams(dp(420), -2, Gravity.CENTER))
-                  }
-                  overlay = ov
-                  root.addView(ov, FrameLayout.LayoutParams(-1, -1))
-                  content.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
-                  first?.requestFocus()
-              }
-
-              private fun closeMenu() {
-                  overlay?.let { root.removeView(it) }
-                  overlay = null
-                  content.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
-                  val f = focusBefore
-                  focusBefore = null
-                  if (f != null && f.isAttachedToWindow) f.requestFocus() else row1.post { row1.getChildAt(0)?.requestFocus() }
-              }
-
-              private fun sys(action: String) {
-                  try { startActivity(Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
-                  catch (e: Exception) {
-                      try { startActivity(Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
-                      catch (e2: Exception) { toast("Settings aren't available") }
-                  }
-              }
-
-              private fun appMenu(app: AppItem) {
-                  if (app.pkg.startsWith("rec:")) { recMenu(app); return }
-                  val pk = app.pkg
-                  val uri = Uri.parse("package:" + pk)
-                  val items = arrayListOf(
-                      MI("Open") { launchApp(app) },
-                      MI("Pin to front") { saveOrder(listOf(pk) + shown.map { it.pkg }.filter { it != pk }) },
-                      MI("Move left") { move(pk, -1) },
-                      MI("Move right") { move(pk, 1) },
-                      MI("Hide from home") { store.put("hidden", (store.list("hidden") + pk).joinToString(",")); render() },
-                      MI("Open side by side with…") { startSplit(app) },
-                      MI("App info") { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) },
-                      MI("Uninstall") { startActivity(Intent(Intent.ACTION_DELETE, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
-                  )
-                  showMenu(app.label, items)
-              }
-
-              private fun customize() {
-                  val items = ArrayList<MI>()
-                  for (o in OPTS) {
-                      items.add(MI(o.title, value = { o.choices[store.sel(o.key)] }, keep = true) {
-                          store.put(o.key, ((store.sel(o.key) + 1) % o.choices.size).toString())
-                          applyLook()
-                          if (o.key == "rtype" || o.key == "minr" || o.key == "toprow") fetchRecs(o.key != "toprow")
-                      })
-                  }
-                  items.add(MI("Set TMDB key (recommendations)") { promptKey("tmdb") })
-                  items.add(MI("Set OMDb key (real IMDb ratings)") { promptKey("omdb") })
-                  items.add(MI("Refresh recommendations") { fetchRecs(true) })
-                  items.add(MI("Data credits") { credits() })
-                  items.add(MI("Unhide all apps") { store.put("hidden", ""); render() })
-                  items.add(MI("Reset app order") { store.put("order", ""); render() })
-                  items.add(MI("Reset all settings") { for (o in OPTS) store.put(o.key, o.def.toString()); applyLook() })
-                  items.add(MI("Android system settings") { sys(Settings.ACTION_SETTINGS) })
-                  showMenu("Customize", items)
-              }
-
-              // ---------- profiles ----------
-              private fun profileMenu() {
-                  val a = store.profiles()
-                  val items = ArrayList<MI>()
-                  for (i in 0 until a.length()) {
-                      val o = a.getJSONObject(i)
-                      val id = o.getString("id")
-                      val mail = o.optString("email")
-                      val label = (if (id == store.cur) "● " else "") + o.getString("name") + (if (mail.isEmpty()) "" else "  ·  " + mail)
-                      items.add(MI(label) { store.cur = id; applyLook() })
-                  }
-                  items.add(MI("Add profile") { store.addProfile("Profile " + (a.length() + 1)); applyLook() })
-                  items.add(MI("Rename profile") { askName() })
-                  items.add(MI("Link Google account") { pickAccount() })
-                  if (a.length() > 1) items.add(MI("Delete this profile") { store.deleteCurrent(); applyLook() })
-                  showMenu("Profiles", items)
-              }
-
-              private fun askName() {
-                  val et = EditText(this)
-                  et.setText(store.profile().getString("name"))
-                  et.setSingleLine()
-                  AlertDialog.Builder(this)
-                      .setTitle("Profile name")
-                      .setView(et)
-                      .setPositiveButton("Save") { _, _ ->
-                          val n = et.text.toString().trim()
-                          if (n.isNotEmpty()) { store.update { it.put("name", n) }; applyLook() }
-                      }
-                      .setNegativeButton("Cancel", null)
-                      .show()
-              }
-
-              private fun pickAccount() {
-                  try {
-                      val i = if (Build.VERSION.SDK_INT >= 26)
-                          AccountManager.newChooseAccountIntent(null, null, arrayOf("com.google"), null, null, null, null)
-                      else
-                          @Suppress("DEPRECATION") AccountManager.newChooseAccountIntent(null, null, arrayOf("com.google"), false, null, null, null, null)
-                      startActivityForResult(i, 77)
-                  } catch (e: Exception) { toast("The account picker isn't available on this TV") }
-              }
-
-              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-                  super.onActivityResult(requestCode, resultCode, data)
-                  if (requestCode == 77 && resultCode == RESULT_OK) {
-                      val mail = data?.getStringExtra(AccountManager.KEY_ACCOUNT_NAME)
-                      if (mail != null) { store.update { it.put("email", mail) }; refreshProfile() }
-                  }
-              }
-
-              // ---------- quick toggles, sound, display, inputs ----------
-              private fun setStatus(tv: TextView, label: String, on: Boolean) {
-                  val s = SpannableString("● " + label)
-                  s.setSpan(ForegroundColorSpan(if (on) 0xFF4ADE80.toInt() else 0xFF6B7280.toInt()), 0, 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                  tv.text = s
-              }
-
-              private fun wifiOn(): Boolean = try {
-                  (applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager).isWifiEnabled
-              } catch (e: Exception) { false }
-
-              private fun btOn(): Boolean = try { BluetoothAdapter.getDefaultAdapter()?.isEnabled == true } catch (e: Exception) { false }
-
-              private fun refreshToggles() {
-                  setStatus(wifiPill, "Wi-Fi", wifiOn())
-                  setStatus(btPill, "Bluetooth", btOn())
-              }
-
-              private fun toggleWifi() {
-                  try {
-                      val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-                      @Suppress("DEPRECATION")
-                      val ok = wm.setWifiEnabled(!wm.isWifiEnabled)
-                      if (!ok) sys(Settings.ACTION_WIFI_SETTINGS)
-                  } catch (e: Exception) { sys(Settings.ACTION_WIFI_SETTINGS) }
-                  handler.postDelayed({ refreshToggles() }, 1500)
-              }
-
-              private fun toggleBt() {
-                  try {
-                      if (Build.VERSION.SDK_INT >= 31 && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
-                          requestPermissions(arrayOf(Manifest.permission.BLUETOOTH_CONNECT), 5)
-                          return
-                      }
-                      val a = BluetoothAdapter.getDefaultAdapter()
-                      if (a == null) { toast("No Bluetooth on this TV"); return }
-                      @Suppress("DEPRECATION")
-                      val ok = if (a.isEnabled) a.disable() else a.enable()
-                      if (!ok) sys(Settings.ACTION_BLUETOOTH_SETTINGS)
-                  } catch (e: Exception) { sys(Settings.ACTION_BLUETOOTH_SETTINGS) }
-                  handler.postDelayed({ refreshToggles() }, 1500)
-              }
-
-              override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
-                  super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-                  refreshToggles()
-              }
-
-              private fun outputs(): String = try {
-                  val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                  val names = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).mapNotNull {
-                      when (it.type) {
-                          AudioDeviceInfo.TYPE_HDMI -> "HDMI"
-                          AudioDeviceInfo.TYPE_HDMI_ARC -> "HDMI ARC"
-                          AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> "Bluetooth"
-                          AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "TV speakers"
-                          AudioDeviceInfo.TYPE_WIRED_HEADPHONES, AudioDeviceInfo.TYPE_WIRED_HEADSET -> "Headphones"
-                          AudioDeviceInfo.TYPE_USB_DEVICE, AudioDeviceInfo.TYPE_USB_HEADSET -> "USB"
-                          else -> null
-                      }
-                  }.distinct()
-                  if (names.isEmpty()) "none found" else names.joinToString(", ")
-              } catch (e: Exception) { "unknown" }
-
-              private fun soundMenu() {
-                  val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                  val items = arrayListOf(
-                      MI("Volume up", keep = true) { am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI) },
-                      MI("Volume down", keep = true) { am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI) },
-                      MI("Mute or unmute", keep = true) { am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_TOGGLE_MUTE, AudioManager.FLAG_SHOW_UI) },
-                      MI("Connected outputs", value = { outputs() }) { sys(Settings.ACTION_SOUND_SETTINGS) },
-                      MI("Sound settings") { sys(Settings.ACTION_SOUND_SETTINGS) }
-                  )
-                  showMenu("Sound", items)
-              }
-
-              private fun displayMenu() {
-                  val items = arrayListOf(
-                      MI("Switch input (HDMI, AV)") { inputsMenu() },
-                      MI("Display settings") { sys(Settings.ACTION_DISPLAY_SETTINGS) },
-                      MI("Screen saver") { sys("android.settings.DREAM_SETTINGS") },
-                      MI("Wi-Fi settings") { sys(Settings.ACTION_WIFI_SETTINGS) },
-                      MI("Bluetooth settings") { sys(Settings.ACTION_BLUETOOTH_SETTINGS) }
-                  )
-                  showMenu("Display", items)
-              }
-
-              private fun inputsMenu() {
-                  val items = ArrayList<MI>()
-                  try {
-                      val tm = getSystemService(Context.TV_INPUT_SERVICE) as TvInputManager
-                      for (info in tm.tvInputList) {
-                          if (!info.isPassthroughInput) continue
-                          val label = (info.loadCustomLabel(this) ?: info.loadLabel(this)).toString()
-                          val id = info.id
-                          items.add(MI(label) {
-                              try {
-                                  startActivity(Intent(Intent.ACTION_VIEW, TvContract.buildChannelUriForPassthroughInput(id)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                              } catch (e: Exception) { toast("Couldn't switch to " + label) }
-                          })
-                      }
-                  } catch (e: Exception) { }
-                  if (items.isEmpty()) items.add(MI("No inputs found. Open TV settings") { sys(Settings.ACTION_SETTINGS) })
-                  showMenu("Switch input", items)
-              }
-
-              // ---------- system stats tile ----------
-              private fun statTv() = TextView(this).apply { setTextColor(0xCCFFFFFF.toInt()); textSize = 11f }
-
-              private fun statBar(color: Int): ProgressBar {
-                  val b = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
-                  b.max = 100
-                  b.progressTintList = ColorStateList.valueOf(color)
-                  b.progressBackgroundTintList = ColorStateList.valueOf(0x33FFFFFF)
-                  return b
-              }
-
-              private fun statCol(tv: TextView, bar: ProgressBar): View {
-                  val col = LinearLayout(this)
-                  col.orientation = LinearLayout.VERTICAL
-                  col.setPadding(dp(8), 0, dp(8), 0)
-                  col.addView(tv)
-                  col.addView(bar, LinearLayout.LayoutParams(dp(72), dp(4)).apply { topMargin = dp(4) })
-                  return col
-              }
-
-              private fun statSet(tv: TextView, bar: ProgressBar, name: String, v: Int?, approx: Boolean) {
-                  tv.text = if (v == null) name + " n/a" else name + (if (approx) " ~" else " ") + v + "%"
-                  bar.progress = v ?: 0
-              }
-
-              private fun updateStats() {
-                  if (statsBox.visibility != View.VISIBLE) return
-                  cpuApprox = false
-                  gpuApprox = false
-                  statSet(cpuTv, cpuBar, "CPU", cpuPct(), cpuApprox)
-                  val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
-                  val mi = ActivityManager.MemoryInfo()
-                  am.getMemoryInfo(mi)
-                  val used = if (mi.totalMem > 0) (100 * (mi.totalMem - mi.availMem) / mi.totalMem).toInt() else null
-                  statSet(ramTv, ramBar, "RAM", used, false)
-                  statSet(gpuTv, gpuBar, "GPU", gpuPct(), gpuApprox)
-              }
-
-              private fun cpuPct(): Int? {
-                  try {
-                      val line = File("/proc/stat").bufferedReader().use { it.readLine() } ?: return null
-                      val n = line.trim().split(Regex("\\s+")).drop(1).mapNotNull { it.toLongOrNull() }
-                      if (n.size >= 5) {
-                          val idle = n[3] + n[4]
-                          val total = n.sum()
-                          val dT = total - prevTotal
-                          val dI = idle - prevIdle
-                          val first = prevTotal == 0L
-                          prevTotal = total; prevIdle = idle
-                          if (!first && dT > 0) return (100 * (dT - dI) / dT).toInt().coerceIn(0, 100)
-                      }
-                  } catch (e: Exception) { }
-                  cpuApprox = true
-                  return freqPct()
-              }
-
-              private fun freqPct(): Int? = try {
-                  var cur = 0L
-                  var max = 0L
-                  for (i in 0 until 16) {
-                      val b = "/sys/devices/system/cpu/cpu" + i + "/cpufreq/"
-                      val c = File(b + "scaling_cur_freq")
-                      val m = File(b + "cpuinfo_max_freq")
-                      if (c.canRead() && m.canRead()) {
-                          cur += c.readText().trim().toLong()
-                          max += m.readText().trim().toLong()
-                      }
-                  }
-                  if (max > 0) (100 * cur / max).toInt().coerceIn(0, 100) else null
-              } catch (e: Exception) { null }
-
-              private val gpuFiles = listOf(
-                  "/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage", "/sys/class/kgsl/kgsl-3d0/devfreq/gpu_load",
-                  "/sys/class/mpgpu/utilization", "/sys/kernel/ged/hal/gpu_utilization",
-                  "/sys/class/misc/mali0/device/utilisation", "/sys/devices/platform/mali.0/utilization"
-              )
-
-              private fun gpuPct(): Int? {
-                  for (p in gpuFiles) {
-                      try {
-                          val f = File(p)
-                          if (f.canRead()) {
-                              val m = Regex("\\d+").find(f.readText())
-                              if (m != null) return m.value.toInt().coerceIn(0, 100)
-                          }
-                      } catch (e: Exception) { }
-                  }
-                  try {
-                      val dirs = File("/sys/class/devfreq").listFiles() ?: return null
-                      for (d in dirs) {
-                          val nm = d.name.lowercase()
-                          if (!(nm.contains("mali") || nm.contains("gpu"))) continue
-                          val c = File(d, "cur_freq")
-                          val m = File(d, "max_freq")
-                          if (c.canRead() && m.canRead()) {
-                              gpuApprox = true
-                              return (100 * c.readText().trim().toLong() / m.readText().trim().toLong()).toInt().coerceIn(0, 100)
-                          }
-                      }
-                  } catch (e: Exception) { }
-                  return null
-              }
-
-              // ---------- recommendations (TMDB, optional OMDb for IMDb scores) ----------
-              private fun textTile(text: String, color: Int): Drawable {
-                  val b = Bitmap.createBitmap(320, 180, Bitmap.Config.ARGB_8888)
-                  val c = Canvas(b)
-                  c.drawColor(color)
-                  val p = Paint(Paint.ANTI_ALIAS_FLAG)
-                  p.color = Color.WHITE
-                  p.textAlign = Paint.Align.CENTER
-                  p.typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-                  val lines = text.split("\n")
-                  p.textSize = if (lines.size > 1) 34f else 44f
-                  var y = if (lines.size > 1) 82f else 104f
-                  for (ln in lines) { c.drawText(ln, 160f, y, p); y += 44f }
-                  return BitmapDrawable(resources, b)
-              }
-
-              private fun infoTile(label: String, pkg: String, text: String, color: Int, meta: String, over: String) =
-                  AppItem(label, pkg, Intent(), textTile(text, color), true, color, false, null, meta, over)
-
-              private fun recTiles(): List<AppItem> {
-                  val out = ArrayList<AppItem>()
-                  when (recState) {
-                      0 -> out.add(infoTile("Add your free TMDB key", "rec:setup", "Set up\nrecommendations", 0xFF2563EB.toInt(), "Setup", "Press OK and paste your free TMDB key (themoviedb.org, Settings, API) to see trending and 8+ rated titles here."))
-                      1 -> out.add(infoTile("Loading recommendations…", "rec:load", "Loading…", 0xFF374151.toInt(), "Loading", "Fetching trending and top-rated titles…"))
-                      3 -> out.add(infoTile("Couldn't load. Press OK to retry", "rec:retry", "Retry", 0xFFB45309.toInt(), "Could not load", "Check your internet connection and key, then press OK to try again."))
-                      else -> out.addAll(recs)
-                  }
-                  if (store.sel("moctale") == 0) out.add(moctale)
-                  return out
-              }
-
-              private fun openRec(a: AppItem) {
-                  when (a.pkg) {
-                      "rec:setup" -> promptKey("tmdb")
-                      "rec:retry" -> fetchRecs(true)
-                      "rec:load" -> { }
-                      else -> try { startActivity(a.intent) } catch (e: Exception) { toast("No browser found. Install a browser or the IMDb app to open links.") }
-                  }
-              }
-
-              private fun recMenu(app: AppItem) {
-                  val items = arrayListOf(
-                      MI("Open") { openRec(app) },
-                      MI("Refresh recommendations") { fetchRecs(true) },
-                      MI("Set TMDB key") { promptKey("tmdb") },
-                      MI("Set OMDb key (real IMDb ratings)") { promptKey("omdb") },
-                      MI("Data credits") { credits() }
-                  )
-                  showMenu("Recommendations", items)
-              }
-
-              private fun credits() {
-                  AlertDialog.Builder(this)
-                      .setTitle("Data credits")
-                      .setMessage("Recommendations and images come from TMDB. This product uses the TMDB API but is not endorsed or certified by TMDB. Real IMDb ratings (optional) come from OMDb. The Moctale tile only opens moctale.in.")
-                      .setPositiveButton("OK", null)
-                      .show()
-              }
-
-              private fun promptKey(which: String) {
-                  val et = EditText(this)
-                  et.setSingleLine()
-                  et.setText(store.gget(which))
-                  val tmdbKey = which == "tmdb"
-                  AlertDialog.Builder(this)
-                      .setTitle(if (tmdbKey) "TMDB API key" else "OMDb API key (optional)")
-                      .setMessage(if (tmdbKey) "Free at themoviedb.org: Settings, then API. Paste the API key or the read access token."
-                                  else "Free at omdbapi.com/apikey.aspx (1,000 requests a day). Gives real IMDb ratings on tiles.")
-                      .setView(et)
-                      .setPositiveButton("Save") { _, _ -> store.gput(which, et.text.toString().trim()); fetchRecs(true) }
-                      .setNegativeButton("Cancel", null)
-                      .show()
-              }
-
-              private fun js(o: JSONObject, k: String): String = if (o.isNull(k)) "" else o.optString(k, "")
-
-              private fun get(url: String, bearer: String?): String {
-                  val c = URL(url).openConnection() as HttpURLConnection
-                  c.connectTimeout = 8000
-                  c.readTimeout = 10000
-                  if (bearer != null) c.setRequestProperty("Authorization", "Bearer " + bearer)
-                  try { return c.inputStream.bufferedReader().use { it.readText() } } finally { c.disconnect() }
-              }
-
-              private fun tmdb(path: String, key: String): String {
-                  val base = "https://api.themoviedb.org/3/" + path
-                  return if (key.length > 40) get(base, key)
-                  else get(base + (if (path.contains("?")) "&" else "?") + "api_key=" + key, null)
-              }
-
-              private fun bitmap(path: String): Bitmap? = try {
-                  URL("https://image.tmdb.org/t/p/w300" + path).openStream().use { BitmapFactory.decodeStream(it) }
-              } catch (e: Exception) { null }
-
-              private fun fetchRecs(force: Boolean) {
-                  if (store.sel("toprow") != 0) return
-                  val key = store.gget("tmdb")
-                  if (key.isEmpty()) { recState = 0; render(); return }
-                  if (!force && recState == 2 && System.currentTimeMillis() - recTime < 3 * 3600_000L) return
-                  recState = 1
-                  render()
-                  val minR = doubleArrayOf(7.5, 8.0, 8.5)[store.sel("minr")]
-                  val type = store.sel("rtype")
-                  val omdb = store.gget("omdb")
-                  net.execute {
-                      try {
-                          val raws = ArrayList<RecRaw>()
-                          val seen = HashSet<String>()
-                          fun addAll(arr: JSONArray, defMt: String, badge: String, max: Int) {
-                              var n = 0
-                              for (i in 0 until arr.length()) {
-                                  if (n >= max) break
-                                  val o = arr.getJSONObject(i)
-                                  val mt = if (o.isNull("media_type")) defMt else o.getString("media_type")
-                                  if (mt != "movie" && mt != "tv") continue
-                                  val id = o.getInt("id")
-                                  if (!seen.add(mt + id)) continue
-                                  val img = js(o, "backdrop_path").ifEmpty { js(o, "poster_path") }
-                                  if (img.isEmpty()) continue
-                                  val title = js(o, "title").ifEmpty { js(o, "name") }
-                                  raws.add(RecRaw(id, mt, title, o.optDouble("vote_average", 0.0), img, badge))
-                                  n++
-                              }
-                          }
-                          val tr = if (type == 1) "trending/movie/week" else if (type == 2) "trending/tv/week" else "trending/all/week"
-                          addAll(JSONObject(tmdb(tr, key)).getJSONArray("results"), if (type == 2) "tv" else "movie", "TRENDING", 8)
-                          for (mt in listOf("movie", "tv")) {
-                              if ((type == 1 && mt == "tv") || (type == 2 && mt == "movie")) continue
-                              val u = "discover/" + mt + "?sort_by=popularity.desc&vote_average.gte=" + minR + "&vote_count.gte=1500&language=en-US"
-                              addAll(JSONObject(tmdb(u, key)).getJSONArray("results"), mt, "TOP RATED", 8)
-                          }
-                          val tiles = ArrayList<AppItem>()
-                          for (r in raws) {
-                              var imdb = ""
-                              var facts = if (r.mt == "movie") "Movie" else "Series"
-                              var overview = ""
-                              var votesN = 0
-                              try {
-                                  val dj = JSONObject(tmdb(r.mt + "/" + r.id + "?append_to_response=external_ids&language=en-US", key))
-                                  if (!dj.isNull("external_ids")) imdb = js(dj.getJSONObject("external_ids"), "imdb_id")
-                                  overview = js(dj, "overview")
-                                  votesN = dj.optInt("vote_count", 0)
-                                  val genres = ArrayList<String>()
-                                  val ga = dj.optJSONArray("genres")
-                                  if (ga != null) for (i in 0 until minOf(ga.length(), 3)) genres.add(ga.getJSONObject(i).optString("name"))
-                                  val countries = ArrayList<String>()
-                                  val pc = dj.optJSONArray("production_countries")
-                                  if (pc != null) for (i in 0 until minOf(pc.length(), 2)) countries.add(pc.getJSONObject(i).optString("name"))
-                                  if (countries.isEmpty()) {
-                                      val oc = dj.optJSONArray("origin_country")
-                                      if (oc != null) for (i in 0 until minOf(oc.length(), 2)) countries.add(Locale("", oc.getString(i)).getDisplayCountry(Locale.ENGLISH))
-                                  }
-                                  val lang = js(dj, "original_language")
-                                  val langName = if (lang.isEmpty()) "" else Locale(lang).getDisplayLanguage(Locale.ENGLISH)
-                                  val year = js(dj, if (r.mt == "movie") "release_date" else "first_air_date").take(4)
-                                  var length = ""
-                                  if (r.mt == "movie") {
-                                      val m = dj.optInt("runtime", 0)
-                                      if (m > 0) length = (m / 60).toString() + "h " + (m % 60) + "m"
-                                  } else {
-                                      val sn = dj.optInt("number_of_seasons", 0)
-                                      if (sn > 0) length = sn.toString() + (if (sn > 1) " seasons" else " season")
-                                  }
-                                  facts = listOf(if (r.mt == "movie") "Movie" else "Series", year, genres.joinToString(", "), countries.joinToString(", "), langName, length)
-                                      .filter { it.isNotEmpty() }.joinToString("  ·  ")
-                              } catch (x: Exception) { }
-                              var rating = r.rating
-                              var src = "TMDB"
-                              if (omdb.isNotEmpty() && imdb.isNotEmpty()) {
-                                  try {
-                                      val v = js(JSONObject(get("https://www.omdbapi.com/?i=" + imdb + "&apikey=" + omdb, null)), "imdbRating").toDoubleOrNull()
-                                      if (v != null) { rating = v; src = "IMDB" }
-                                  } catch (x: Exception) { }
-                              }
-                              if (r.badge == "TOP RATED" && rating < minR) continue
-                              val bmp = bitmap(r.img) ?: continue
-                              val d = BitmapDrawable(resources, bmp)
-                              val url = if (imdb.isNotEmpty()) "https://www.imdb.com/title/" + imdb + "/" else "https://www.themoviedb.org/" + r.mt + "/" + r.id
-                              val label = r.title + "  ★ " + String.format(Locale.US, "%.1f", rating)
-                              val metaLine = "★ " + String.format(Locale.US, "%.1f", rating) + " " + src +
-                                  (if (src == "TMDB" && votesN > 0) " (" + votesN + " votes)" else "") + "  ·  " + facts
-                              tiles.add(AppItem(label, "rec:" + r.mt + r.id,
-                                  Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                                  d, true, tintOf(d), false, r.badge + " · " + src, metaLine, overview))
-                          }
-                          val a = tiles.filter { it.badge?.startsWith("TRENDING") == true }
-                          val b = tiles.filter { it.badge?.startsWith("TRENDING") != true }
-                          val mixed = ArrayList<AppItem>()
-                          for (i in 0 until maxOf(a.size, b.size)) {
-                              if (i < a.size) mixed.add(a[i])
-                              if (i < b.size) mixed.add(b[i])
-                          }
-                          runOnUiThread { recs = mixed; recState = if (mixed.isEmpty()) 3 else 2; recTime = System.currentTimeMillis(); render() }
-                      } catch (e: Exception) {
-                          runOnUiThread { recState = 3; render() }
-                      }
-                  }
-              }
-
-              private fun advanceRecs() {
-                  if (overlay != null || store.sel("layout") != 0 || store.sel("toprow") != 0) return
-                  if (rowR.visibility != View.VISIBLE || rowR.hasFocus() || aR.items.size < 4) return
-                  if (rowR.canScrollHorizontally(1)) rowR.smoothScrollBy(dp(aR.cw + 22), 0) else rowR.smoothScrollToPosition(0)
-              }
-
-              private fun showDetails(app: AppItem) {
-                  val has = app.meta != null
-                  detBox.visibility = if (has) View.VISIBLE else View.GONE
-                  heroBox.visibility = if (has) View.INVISIBLE else if (store.sel("clock") == 0) View.VISIBLE else View.GONE
-                  if (has) {
-                      detTitle.text = app.label
-                      detMeta.text = app.meta
-                      detOver.text = app.overview ?: ""
-                  }
-              }
-
-              private fun quickMenu() {
-                  val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
-                  val items = arrayListOf(
-                      MI("Wi-Fi", value = { if (wifiOn()) "On" else "Off" }, keep = true) { toggleWifi() },
-                      MI("Bluetooth", value = { if (btOn()) "On" else "Off" }, keep = true) { toggleBt() },
-                      MI("Mute", value = { if (am.isStreamMute(AudioManager.STREAM_MUSIC)) "On" else "Off" }, keep = true) {
-                          am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_TOGGLE_MUTE, AudioManager.FLAG_SHOW_UI)
-                      },
-                      MI("Volume up", keep = true) { am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI) },
-                      MI("Volume down", keep = true) { am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI) },
-                      MI("Audio output", value = { outputs() }) { sys(Settings.ACTION_SOUND_SETTINGS) },
-                      MI("Video input (HDMI, AV)") { inputsMenu() },
-                      MI("Display settings") { sys(Settings.ACTION_DISPLAY_SETTINGS) },
-                      MI("Screen saver") { sys("android.settings.DREAM_SETTINGS") },
-                      MI("Split screen", value = { if (splitSupported()) "Supported" else "Not supported" }) {
-                          toast(if (splitSupported()) "Hold OK on an app, then Open side by side" else "This TV's system doesn't allow split screen")
-                      }
-                  )
-                  showMenu("Quick settings", items)
-              }
-
-              // ---------- direct Audio / Video settings shortcuts ----------
-              private fun openShortcut(kind: String) {
-                  val saved = store.gget("sc_" + kind)
-                  if (saved.contains("/")) {
-                      try {
-                          startActivity(Intent().setClassName(saved.substringBefore("/"), saved.substringAfter("/")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                          return
-                      } catch (e: Exception) { }
-                  }
-                  val cands = ArrayList<Intent>()
-                  if (kind == "audio") {
-                      cands.add(Intent(Settings.ACTION_SOUND_SETTINGS))
-                      cands.add(Intent().setClassName("com.android.tv.settings", "com.android.tv.settings.device.sound.SoundActivity"))
-                  } else {
-                      cands.add(Intent(Settings.ACTION_DISPLAY_SETTINGS))
-                      cands.add(Intent().setClassName("com.android.tv.settings", "com.android.tv.settings.device.display.DisplayActivity"))
-                  }
-                  for (i in cands) {
-                      i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                      if (i.resolveActivity(packageManager) != null) {
-                          try { startActivity(i); return } catch (e: Exception) { }
-                      }
-                  }
-                  toast("No direct page found. Hold OK on this button to pick one.")
-                  sys(Settings.ACTION_SETTINGS)
-              }
-
-              private fun pickSettingsPage(kind: String) {
-                  val pm = packageManager
-                  val items = ArrayList<MI>()
-                  items.add(MI("Use default (reset)") { store.gput("sc_" + kind, ""); toast("Back to default") })
-                  for (pkg in listOf("com.xiaomi.mitv.settings", "com.android.tv.settings", "com.android.settings")) {
-                      try {
-                          val acts = pm.getPackageInfo(pkg, PackageManager.GET_ACTIVITIES).activities ?: continue
-                          for (a in acts) {
-                              if (!a.exported || !a.enabled) continue
-                              val nm = a.name
-                              items.add(MI(pkg.substringAfterLast('.') + ": " + nm.substringAfterLast('.')) {
-                                  store.gput("sc_" + kind, pkg + "/" + nm)
-                                  openShortcut(kind)
-                              })
-                          }
-                      } catch (e: Exception) { }
-                  }
-                  showMenu(if (kind == "audio") "Tap a page to open and save as Audio" else "Tap a page to open and save as Video", items)
-              }
-
-              // ---------- lifecycle ----------
-              override fun onStart() {
-                  super.onStart()
-                  val f = IntentFilter().apply {
-                      addAction(Intent.ACTION_PACKAGE_ADDED)
-                      addAction(Intent.ACTION_PACKAGE_REMOVED)
-                      addAction(Intent.ACTION_PACKAGE_REPLACED)
-                      addDataScheme("package")
-                  }
-                  if (Build.VERSION.SDK_INT >= 33) registerReceiver(pkgReceiver, f, Context.RECEIVER_EXPORTED)
-                  else registerReceiver(pkgReceiver, f)
-                  loadApps()
-                  fetchRecs(false)
-                  handler.post(tick)
-                  handler.post(statsTick)
-                  handler.postDelayed(carousel, 6000)
-              }
-
-              override fun onStop() {
-                  super.onStop()
-                  unregisterReceiver(pkgReceiver)
-                  handler.removeCallbacks(tick)
-                  handler.removeCallbacks(statsTick)
-                  handler.removeCallbacks(carousel)
-              }
-
-              override fun onNewIntent(intent: Intent?) {
-                  super.onNewIntent(intent)
-                  if (overlay != null) closeMenu()
-                  focusPending = true
-                  row1.scrollToPosition(0)
-                  row1.post { row1.getChildAt(0)?.requestFocus() }
-              }
-
-              @Deprecated("Home screen: back only closes menus")
-              override fun onBackPressed() {
-                  if (overlay != null) closeMenu() else splitFirst = null
-              }
-
-              private fun updateTime() {
-                  val now = Date()
-                  clock.text = DateFormat.getTimeFormat(this).format(now)
-                  date.text = SimpleDateFormat("EEEE, d MMMM", Locale.getDefault()).format(now)
-                  val h = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
-                  val part = when {
-                      h < 5 -> "Good night"
-                      h < 12 -> "Good morning"
-                      h < 17 -> "Good afternoon"
-                      else -> "Good evening"
-                  }
-                  greeting.text = part + ", " + store.profile().getString("name")
-              }
-          }
-          CINE_EOF
-          mkdir -p app/src/main/java/com/cine/launcher
-          cat > app/src/main/java/com/cine/launcher/Prefs.kt <<'CINE_EOF'
-          package com.cine.launcher
-
-          import android.content.Context
-          import org.json.JSONArray
-          import org.json.JSONObject
-
-          class Look {
-              var radius = 18
-              var scale = 1.13f
-              var sheen = true
-              var labels = 0
-              var anim = true
-          }
-
-          class Opt(val key: String, val title: String, val choices: List<String>, val def: Int)
-
-          val OPTS = listOf(
-              Opt("accent", "Glow color", listOf("Auto", "Blue", "Purple", "Red", "Green", "Orange", "Pink", "Teal"), 0),
-              Opt("bg", "Background", listOf("Aurora", "Dark", "Black"), 0),
-              Opt("layout", "Layout", listOf("Top row + apps", "Two rows", "Single row"), 0),
-              Opt("toprow", "Top row shows", listOf("Recommended", "Recent apps", "Off"), 0),
-              Opt("rtype", "Recommend", listOf("Movies + shows", "Movies", "Shows"), 0),
-              Opt("minr", "Minimum rating", listOf("7.5", "8.0", "8.5"), 1),
-              Opt("stats", "System tile", listOf("Show", "Hide"), 0),
-              Opt("moctale", "Moctale tile", listOf("Show", "Hide"), 0),
-              Opt("size", "Card size", listOf("Small", "Medium", "Large"), 1),
-              Opt("count", "Apps in big row", listOf("4", "6", "8", "10", "12"), 2),
-              Opt("corner", "Corners", listOf("Square", "Rounded", "Round"), 1),
-              Opt("focus", "Focus zoom", listOf("Subtle", "Normal", "Big"), 1),
-              Opt("sheen", "Focus shine", listOf("On", "Off"), 0),
-              Opt("labels", "App names", listOf("On focus", "Always", "Hidden"), 0),
-              Opt("sort", "Sort apps", listOf("A to Z", "Z to A"), 0),
-              Opt("clock", "Clock", listOf("Show", "Hide"), 0),
-              Opt("greet", "Greeting", listOf("Show", "Hide"), 0),
-              Opt("anim", "Animations", listOf("On", "Off"), 0)
-          )
-
-          class Store(ctx: Context) {
-              private val sp = ctx.getSharedPreferences("cine", Context.MODE_PRIVATE)
-
-              var cur: String
-                  get() = sp.getString("cur", "p1") ?: "p1"
-                  set(v) { sp.edit().putString("cur", v).apply() }
-
-              fun profiles(): JSONArray {
-                  val s = sp.getString("profiles", null)
-                  if (s == null) {
-                      val a = JSONArray().put(JSONObject().put("id", "p1").put("name", "Me").put("email", ""))
-                      saveProfiles(a)
-                      return a
-                  }
-                  return JSONArray(s)
-              }
-
-              fun saveProfiles(a: JSONArray) { sp.edit().putString("profiles", a.toString()).apply() }
-
-              fun profile(): JSONObject {
-                  val a = profiles()
-                  for (i in 0 until a.length()) if (a.getJSONObject(i).getString("id") == cur) return a.getJSONObject(i)
-                  return a.getJSONObject(0)
-              }
-
-              fun update(f: (JSONObject) -> Unit) {
-                  val id = profile().getString("id")
-                  val a = profiles()
-                  for (i in 0 until a.length()) {
-                      val o = a.getJSONObject(i)
-                      if (o.getString("id") == id) f(o)
-                  }
-                  saveProfiles(a)
-              }
-
-              fun addProfile(name: String) {
-                  val a = profiles()
-                  val id = "p" + System.currentTimeMillis()
-                  a.put(JSONObject().put("id", id).put("name", name).put("email", ""))
-                  saveProfiles(a)
-                  cur = id
-              }
-
-              fun deleteCurrent() {
-                  val a = profiles()
-                  if (a.length() < 2) return
-                  val id = profile().getString("id")
-                  val n = JSONArray()
-                  for (i in 0 until a.length()) {
-                      val o = a.getJSONObject(i)
-                      if (o.getString("id") != id) n.put(o)
-                  }
-                  saveProfiles(n)
-                  cur = n.getJSONObject(0).getString("id")
-              }
-
-              fun get(k: String, d: String): String = sp.getString(profile().getString("id") + "." + k, d) ?: d
-              fun put(k: String, v: String) { sp.edit().putString(profile().getString("id") + "." + k, v).apply() }
-              fun gget(k: String): String = sp.getString("g." + k, "") ?: ""
-              fun gput(k: String, v: String) { sp.edit().putString("g." + k, v).apply() }
-              fun list(k: String): List<String> = get(k, "").split(",").filter { it.isNotEmpty() }
-
-              fun sel(key: String): Int {
-                  val o = OPTS.first { it.key == key }
-                  return (get(key, o.def.toString()).toIntOrNull() ?: o.def).coerceIn(0, o.choices.size - 1)
-              }
-          }
-          CINE_EOF
-          mkdir -p app/src/main/res/drawable
-          cat > app/src/main/res/drawable/banner.xml <<'CINE_EOF'
-          <vector xmlns:android="http://schemas.android.com/apk/res/android"
-              android:width="320dp" android:height="180dp"
-              android:viewportWidth="320" android:viewportHeight="180">
-              <path android:fillColor="#0A0E1A" android:pathData="M0,0h320v180h-320z" />
-              <path android:fillColor="#FFFFFF" android:pathData="M140,60L196,90L140,120z" />
-          </vector>
-          CINE_EOF
-          mkdir -p app/src/main/res/drawable
-          cat > app/src/main/res/drawable/ic_launcher.xml <<'CINE_EOF'
-          <vector xmlns:android="http://schemas.android.com/apk/res/android"
-              android:width="108dp" android:height="108dp"
-              android:viewportWidth="108" android:viewportHeight="108">
-              <path android:fillColor="#0A0E1A" android:pathData="M0,0h108v108h-108z" />
-              <path android:fillColor="#FFFFFF" android:pathData="M42,34L76,54L42,74z" />
-          </vector>
-          CINE_EOF
-          mkdir -p app/src/main/res/values
-          cat > app/src/main/res/values/themes.xml <<'CINE_EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <resources>
-              <style name="Theme.Cine" parent="android:Theme.Material.NoActionBar">
-                  <item name="android:windowBackground">@android:color/black</item>
-                  <item name="android:windowAnimationStyle">@null</item>
-                  <item name="android:statusBarColor">@android:color/transparent</item>
-                  <item name="android:navigationBarColor">@android:color/transparent</item>
-              </style>
-          </resources>
-          CINE_EOF
-          cat > build.gradle.kts <<'CINE_EOF'
-          plugins {
-              id("com.android.application") version "8.5.2" apply false
-              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
-          }
-          CINE_EOF
-          cat > gradle.properties <<'CINE_EOF'
-          org.gradle.jvmargs=-Xmx2g
-          android.useAndroidX=true
-          android.nonTransitiveRClass=true
-          CINE_EOF
-          cat > settings.gradle.kts <<'CINE_EOF'
-          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
-          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
-          rootProject.name = "CineLauncher"
-          include(":app")
-          CINE_EOF
-
-      - name: Build
-        run: gradle assembleDebug --no-daemon
-      - name: Rename APK
-        run: cp app/build/outputs/apk/debug/app-debug.apk CineLauncher.apk
-      - name: Publish release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ github.run_number }}
-          name: Cine Launcher v${{ github.run_number }}
-          files: CineLauncher.apk
+                      setPadding(dp(12), dp(8), dp(12), dp(8))
+                      background = GradientDrawable().apply { 
+                          setColor(if (look.glassMode) 0x50111111.toInt() else 0x26FFFFFF)
+                          cornerRadius = dp(12).toFloat
