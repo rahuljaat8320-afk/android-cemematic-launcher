@@ -39,7 +39,7 @@ jobs:
                   release {
                       isMinifyEnabled = true
                       isShrinkResources = true
-                      signingConfig = signingConfigs.getByName("debug")
+                      signingConfig = signingConfigs.getByName("debug") // fine for sideloading
                   }
               }
               compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
@@ -57,12 +57,13 @@ jobs:
               <uses-feature android:name="android.software.leanback" android:required="false" />
               <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
 
-              <uses-permission android:name="android.permission.INTERNET" />
               <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
               <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
               <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
               <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
               <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+              <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+              <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
               <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
 
               <queries>
@@ -74,6 +75,10 @@ jobs:
                       <action android:name="android.intent.action.MAIN" />
                       <category android:name="android.intent.category.LAUNCHER" />
                   </intent>
+                  <intent><action android:name="android.settings.BLUETOOTH_SETTINGS" /></intent>
+                  <intent><action android:name="android.settings.WIFI_SETTINGS" /></intent>
+                  <intent><action android:name="android.settings.SOUND_SETTINGS" /></intent>
+                  <intent><action android:name="android.settings.DISPLAY_SETTINGS" /></intent>
                   <package android:name="com.xiaomi.mitv.settings" />
                   <package android:name="com.android.tv.settings" />
                   <package android:name="com.android.settings" />
@@ -111,43 +116,1736 @@ jobs:
           </manifest>
           CINE_EOF
           mkdir -p app/src/main/java/com/cine/launcher
+          cat > app/src/main/java/com/cine/launcher/AppAdapter.kt <<'CINE_EOF'
+          package com.cine.launcher
+
+          import android.content.Intent
+          import android.graphics.Bitmap
+          import android.graphics.Canvas
+          import android.graphics.Color
+          import android.graphics.ColorFilter
+          import android.graphics.Outline
+          import android.graphics.Paint
+          import android.graphics.Path
+          import android.graphics.PixelFormat
+          import android.graphics.Rect
+          import android.graphics.RectF
+          import android.graphics.Typeface
+          import android.graphics.drawable.Drawable
+          import android.graphics.drawable.GradientDrawable
+          import android.text.TextUtils
+          import android.view.Gravity
+          import android.view.View
+          import android.view.ViewGroup
+          import android.view.ViewOutlineProvider
+          import android.view.animation.DecelerateInterpolator
+          import android.view.animation.OvershootInterpolator
+          import android.widget.FrameLayout
+          import android.widget.ImageView
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import androidx.recyclerview.widget.RecyclerView
+
+          /** Glass / plain tile background. Draws the blurred wallpaper region behind the view when a backdrop is given. */
+          class TileBg(
+              private val v: View,
+              private val backdrop: Bitmap?,
+              private val radius: Float,
+              private val color: Int,
+              private val fillA: Float,
+              private val edge: Boolean,
+              private val stroke: Float
+          ) : Drawable() {
+              var boost = 0f
+              var ring = false
+              private val fillP = Paint(Paint.ANTI_ALIAS_FLAG)
+              private val lineP = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
+              private val bmpP = Paint(Paint.FILTER_BITMAP_FLAG)
+              private val path = Path()
+              private val rect = RectF()
+              private val src = Rect()
+              private val loc = IntArray(2)
+
+              override fun draw(c: Canvas) {
+                  val b = bounds
+                  if (b.isEmpty) return
+                  rect.set(b)
+                  val half = minOf(rect.width(), rect.height()) / 2f
+                  val r = if (radius < 0f) half else minOf(radius, half)
+                  path.reset()
+                  path.addRoundRect(rect, r, r, Path.Direction.CW)
+                  c.save()
+                  c.clipPath(path)
+                  if (backdrop != null) {
+                      v.getLocationInWindow(loc)
+                      src.set(loc[0], loc[1], loc[0] + b.width(), loc[1] + b.height())
+                      c.drawBitmap(backdrop, src, b, bmpP)
+                  }
+                  val a = ((fillA + boost).coerceIn(0f, 1f) * 255f).toInt()
+                  fillP.color = (color and 0x00FFFFFF) or (a shl 24)
+                  c.drawRect(rect, fillP)
+                  c.restore()
+                  if (edge) {
+                      lineP.strokeWidth = stroke
+                      lineP.color = 0x66FFFFFF
+                      c.drawPath(path, lineP)
+                  }
+                  if (ring) {
+                      lineP.strokeWidth = stroke * 2.5f
+                      lineP.color = 0xCCFFFFFF.toInt()
+                      c.drawPath(path, lineP)
+                  }
+              }
+
+              override fun setAlpha(alpha: Int) {}
+              override fun setColorFilter(colorFilter: ColorFilter?) {}
+              override fun getOpacity(): Int = PixelFormat.TRANSLUCENT
+          }
+
+          data class AppItem(
+              val label: String,
+              val pkg: String,
+              val intent: Intent,
+              val image: Drawable,
+              val icon: Drawable,
+              val isBanner: Boolean,
+              val tint: Int?
+          )
+
+          class AppAdapter(
+              private val look: Look,
+              private val onFocus: (AppItem) -> Unit,
+              private val onOpen: (AppItem, View) -> Unit,
+              private val onMenu: (AppItem) -> Unit
+          ) : RecyclerView.Adapter<AppAdapter.VH>() {
+
+              var items: List<AppItem> = emptyList()
+              var cw = 208
+              var ch = 117
+
+              class VH(
+                  val root: LinearLayout, val card: FrameLayout, val img: ImageView,
+                  val sheen: View, val ring: View, val label: TextView
+              ) : RecyclerView.ViewHolder(root)
+
+              override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
+                  val c = parent.context
+                  val d = c.resources.displayMetrics.density
+                  fun dp(v: Int) = (v * d).toInt()
+                  val radius = dp(look.radius).toFloat()
+                  val circle = look.circle
+
+                  val root = LinearLayout(c).apply {
+                      orientation = LinearLayout.VERTICAL
+                      gravity = Gravity.CENTER_HORIZONTAL
+                      clipChildren = false
+                      layoutParams = RecyclerView.LayoutParams(dp(cw), -2).apply { marginEnd = dp(look.gap) }
+                  }
+                  val card = FrameLayout(c)
+                  card.layoutParams = LinearLayout.LayoutParams(dp(cw), dp(ch))
+                  card.background = TileBg(
+                      card, look.backdrop, if (circle) -1f else radius,
+                      look.fillColor, look.fillA, look.edge, d
+                  )
+                  card.outlineProvider = object : ViewOutlineProvider() {
+                      override fun getOutline(v: View, o: Outline) {
+                          val r = if (circle) minOf(v.width, v.height) / 2f else radius
+                          o.setRoundRect(0, 0, v.width, v.height, r)
+                      }
+                  }
+                  card.clipToOutline = true
+                  card.isFocusable = true
+                  card.isFocusableInTouchMode = false
+
+                  val img = ImageView(c).apply { layoutParams = FrameLayout.LayoutParams(-1, -1) }
+                  val sheen = View(c).apply {
+                      layoutParams = FrameLayout.LayoutParams(-1, -1)
+                      background = GradientDrawable(
+                          GradientDrawable.Orientation.TL_BR,
+                          intArrayOf(0x55FFFFFF, 0x10FFFFFF, 0x00FFFFFF)
+                      )
+                      alpha = 0f
+                  }
+                  val ring = View(c).apply {
+                      layoutParams = FrameLayout.LayoutParams(-1, -1)
+                      background = GradientDrawable().apply {
+                          setColor(0)
+                          setStroke(dp(3), look.ringColor)
+                          cornerRadius = if (circle) dp(300).toFloat() else radius
+                      }
+                      alpha = 0f
+                  }
+                  card.addView(img); card.addView(sheen); card.addView(ring)
+
+                  val label = TextView(c).apply {
+                      layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) }
+                      gravity = Gravity.CENTER
+                      setTextColor(Color.WHITE)
+                      setShadowLayer(6f, 0f, 1f, 0x99000000.toInt())
+                      textSize = 14f
+                      typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                      maxLines = 1
+                      ellipsize = TextUtils.TruncateAt.END
+                  }
+                  root.addView(card); root.addView(label)
+                  return VH(root, card, img, sheen, ring, label)
+              }
+
+              override fun onBindViewHolder(h: VH, position: Int) {
+                  val item = items[position]
+                  val d = h.card.resources.displayMetrics.density
+                  val banner = item.isBanner && !look.useIcon
+                  h.img.setImageDrawable(if (look.useIcon) item.icon else item.image)
+                  if (banner) {
+                      h.img.scaleType = ImageView.ScaleType.CENTER_CROP
+                      h.img.setPadding(0, 0, 0, 0)
+                      h.img.alpha = look.imgAlpha
+                  } else {
+                      val pad = (ch * 0.2f * d).toInt()
+                      h.img.scaleType = ImageView.ScaleType.FIT_CENTER
+                      h.img.setPadding(pad, pad, pad, pad)
+                      h.img.alpha = 1f
+                  }
+                  h.label.text = item.label
+                  h.label.visibility = if (look.labels == 2) View.GONE else View.VISIBLE
+                  h.card.scaleX = 1f; h.card.scaleY = 1f; h.card.translationZ = 0f; h.card.translationY = 0f
+                  h.sheen.alpha = 0f
+                  h.ring.alpha = 0f
+                  h.label.alpha = if (look.labels == 1) 1f else 0f
+
+                  h.card.setOnFocusChangeListener { v, focused ->
+                      val s = if (focused) look.scale else 1f
+                      val dur = if (look.anim && look.style != 3) look.dur else 0L
+                      val lift = if (focused && look.style == 2) -8f * d else 0f
+                      v.animate().scaleX(s).scaleY(s).translationY(lift)
+                          .translationZ(if (focused) 28 * d else 0f)
+                          .setInterpolator(if (look.style == 1) OvershootInterpolator(2.2f) else DecelerateInterpolator())
+                          .setDuration(dur).start()
+                      if (look.sheen) h.sheen.animate().alpha(if (focused) 1f else 0f).setDuration(dur).start()
+                      if (look.ring != 0) h.ring.animate().alpha(if (focused) 1f else 0f).setDuration(dur).start()
+                      if (look.labels == 0) h.label.animate().alpha(if (focused) 1f else 0f).setDuration(dur).start()
+                      if (focused) onFocus(item)
+                  }
+                  h.card.setOnClickListener { onOpen(item, h.card) }
+                  h.card.setOnLongClickListener { onMenu(item); true }
+              }
+
+              override fun getItemCount() = items.size
+          }
+          CINE_EOF
+          mkdir -p app/src/main/java/com/cine/launcher
+          cat > app/src/main/java/com/cine/launcher/MainActivity.kt <<'CINE_EOF'
+          package com.cine.launcher
+
+          import android.Manifest
+          import android.accounts.AccountManager
+          import android.animation.ArgbEvaluator
+          import android.animation.ValueAnimator
+          import android.app.Activity
+          import android.app.ActivityManager
+          import android.app.ActivityOptions
+          import android.app.AlertDialog
+          import android.bluetooth.BluetoothAdapter
+          import android.content.BroadcastReceiver
+          import android.content.ContentUris
+          import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
+          import android.content.pm.PackageManager
+          import android.content.res.ColorStateList
+          import android.content.res.Resources
+          import android.graphics.Bitmap
+          import android.graphics.BitmapFactory
+          import android.graphics.Canvas
+          import android.graphics.Color
+          import android.graphics.Matrix
+          import android.graphics.Paint
+          import android.graphics.Typeface
+          import android.graphics.drawable.ColorDrawable
+          import android.graphics.drawable.Drawable
+          import android.graphics.drawable.GradientDrawable
+          import android.graphics.drawable.LayerDrawable
+          import android.graphics.drawable.StateListDrawable
+          import android.media.AudioDeviceInfo
+          import android.media.AudioManager
+          import android.media.tv.TvContract
+          import android.media.tv.TvInputManager
+          import android.net.Uri
+          import android.net.wifi.WifiManager
+          import android.os.Build
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.provider.MediaStore
+          import android.provider.Settings
+          import android.text.TextUtils
+          import android.text.format.DateFormat
+          import android.util.StateSet
+          import android.view.Gravity
+          import android.view.KeyEvent
+          import android.view.View
+          import android.view.ViewGroup
+          import android.view.animation.DecelerateInterpolator
+          import android.widget.EditText
+          import android.widget.FrameLayout
+          import android.widget.ImageView
+          import android.widget.LinearLayout
+          import android.widget.ProgressBar
+          import android.widget.ScrollView
+          import android.widget.TextView
+          import android.widget.Toast
+          import androidx.recyclerview.widget.LinearLayoutManager
+          import androidx.recyclerview.widget.RecyclerView
+          import java.io.File
+          import java.io.FileOutputStream
+          import java.text.SimpleDateFormat
+          import java.util.Collections
+          import java.util.Date
+          import java.util.Locale
+          import java.util.concurrent.Executors
+
+          class MI(
+              val label: String,
+              val value: (() -> String)? = null,
+              val keep: Boolean = false,
+              val adj: ((Int) -> Unit)? = null,
+              val run: () -> Unit
+          )
+
+          class MainActivity : Activity() {
+
+              private lateinit var store: Store
+              private val look = Look()
+              private lateinit var root: FrameLayout
+              private lateinit var wallView: ImageView
+              private lateinit var scrim: View
+              private lateinit var auroraView: View
+              private lateinit var content: FrameLayout
+              private var overlay: View? = null
+              private var focusBefore: View? = null
+              private var menuBack: (() -> Unit)? = null
+
+              private lateinit var clock: TextView
+              private lateinit var date: TextView
+              private lateinit var clockBox: LinearLayout
+              private lateinit var btnBar: LinearLayout
+              private lateinit var profBtn: TextView
+              private lateinit var wifiBtn: ImageView
+              private lateinit var btBtn: ImageView
+              private lateinit var audBtn: ImageView
+              private lateinit var vidBtn: ImageView
+              private lateinit var moreBtn: ImageView
+              private lateinit var setBtn: ImageView
+              private lateinit var rowR: RecyclerView
+              private lateinit var row1: RecyclerView
+              private lateinit var row2: RecyclerView
+              private lateinit var aR: AppAdapter
+              private lateinit var a1: AppAdapter
+              private lateinit var a2: AppAdapter
+              private lateinit var glowA: GradientDrawable
+              private lateinit var glowB: GradientDrawable
+              private lateinit var baseBg: ColorDrawable
+              private lateinit var statsBox: LinearLayout
+              private lateinit var cpuTile: LinearLayout
+              private lateinit var ramTile: LinearLayout
+              private lateinit var gpuTile: LinearLayout
+              private lateinit var cpuTv: TextView
+              private lateinit var cpuBar: ProgressBar
+              private lateinit var ramTv: TextView
+              private lateinit var ramBar: ProgressBar
+              private lateinit var gpuTv: TextView
+              private lateinit var gpuBar: ProgressBar
+
+              private var focusPending = true
+              private var launchedAway = false
+              private var prevTotal = 0L
+              private var prevIdle = 0L
+              private var cpuApprox = false
+              private var gpuApprox = false
+              private var avatarCol = 0xFF3B4CCA.toInt()
+
+              private var wallBase: Bitmap? = null
+              private var wallKey = ""
+              private var wallTint = 0xFF4F7CFF.toInt()
+              private var bdBmp: Bitmap? = null
+              private var bdKey = ""
+
+              private val statsTick = object : Runnable { override fun run() { updateStats(); handler.postDelayed(this, 2000) } }
+              private val handler = Handler(Looper.getMainLooper())
+              private val io = Executors.newSingleThreadExecutor()
+              private val defaultTint = 0xFF3B4CCA.toInt()
+              private val accents = arrayOf<Int?>(
+                  null, 0xFF3B82F6.toInt(), 0xFF8B5CF6.toInt(), 0xFFEF4444.toInt(),
+                  0xFF22C55E.toInt(), 0xFFF59E0B.toInt(), 0xFFEC4899.toInt(), 0xFF14B8A6.toInt()
+              )
+              private val avatarColors = intArrayOf(0xFF3B4CCA.toInt(), 0xFF0F9D7A.toInt(), 0xFFD9480F.toInt(), 0xFF9C36B5.toInt(), 0xFFC2255C.toInt())
+              private var curTint = defaultTint
+              private var tintAnim: ValueAnimator? = null
+              private var master: List<AppItem> = emptyList()
+              private var shown: List<AppItem> = emptyList()
+              private var splitFirst: AppItem? = null
+
+              private val tick = object : Runnable {
+                  override fun run() { updateTime(); refreshToggles(); handler.postDelayed(this, 15_000) }
+              }
+              private val pkgReceiver = object : BroadcastReceiver() {
+                  override fun onReceive(c: Context, i: Intent) { loadApps() }
+              }
+
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+              private fun toast(m: String) { Toast.makeText(this, m, Toast.LENGTH_SHORT).show() }
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  store = Store(this)
+                  val dm = resources.displayMetrics
+                  fun glow(cx: Float, cy: Float, r: Float) = GradientDrawable().apply {
+                      gradientType = GradientDrawable.RADIAL_GRADIENT
+                      setGradientCenter(cx, cy)
+                      gradientRadius = r
+                      colors = intArrayOf(0, 0)
+                  }
+                  glowA = glow(0.18f, 0.05f, dm.widthPixels * 0.8f)
+                  glowB = glow(0.95f, 0.6f, dm.widthPixels * 0.6f)
+                  baseBg = ColorDrawable(0xFF05060B.toInt())
+                  root = FrameLayout(this).apply { background = baseBg }
+                  wallView = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_XY }
+                  scrim = View(this)
+                  auroraView = View(this).apply { background = LayerDrawable(arrayOf<Drawable>(glowA, glowB)) }
+                  content = FrameLayout(this).apply { clipChildren = false }
+                  root.addView(wallView, FrameLayout.LayoutParams(-1, -1))
+                  root.addView(scrim, FrameLayout.LayoutParams(-1, -1))
+                  root.addView(auroraView, FrameLayout.LayoutParams(-1, -1))
+                  root.addView(content, FrameLayout.LayoutParams(-1, -1))
+                  buildTop()
+                  buildStats()
+                  buildRows()
+                  setContentView(root)
+                  applyLook()
+              }
+
+              // ---------- UI building ----------
+              private fun pillBg(r: Int) = StateListDrawable().apply {
+                  addState(intArrayOf(android.R.attr.state_focused), GradientDrawable().apply { setColor(0x66FFFFFF); cornerRadius = dp(r).toFloat() })
+                  addState(StateSet.WILD_CARD, GradientDrawable().apply { setColor(0x22FFFFFF); cornerRadius = dp(r).toFloat() })
+              }
+
+              private fun zoomOnFocus(v: View) {
+                  v.setOnFocusChangeListener { view, f ->
+                      val z = if (f) store.n("bzoom") / 100f else 1f
+                      val d = if (look.anim) look.dur else 0L
+                      view.animate().scaleX(z).scaleY(z).setDuration(d).start()
+                      (view.background as? TileBg)?.let { it.boost = if (f) 0.2f else 0f; it.ring = f; view.invalidate() }
+                  }
+              }
+
+              private fun iconBtn(res: Int, desc: String, onLong: (() -> Unit)? = null, click: () -> Unit): ImageView {
+                  val v = ImageView(this)
+                  v.setImageResource(res)
+                  v.contentDescription = desc
+                  v.isFocusable = true
+                  v.setColorFilter(Color.WHITE)
+                  zoomOnFocus(v)
+                  v.setOnClickListener { click() }
+                  if (onLong != null) v.setOnLongClickListener { onLong(); true }
+                  return v
+              }
+
+              private fun buildTop() {
+                  btnBar = LinearLayout(this).apply {
+                      orientation = LinearLayout.HORIZONTAL
+                      gravity = Gravity.CENTER_VERTICAL
+                      clipChildren = false
+                  }
+                  profBtn = TextView(this).apply {
+                      gravity = Gravity.CENTER
+                      setTextColor(Color.WHITE)
+                      typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
+                      isFocusable = true
+                      contentDescription = "Profile"
+                      setOnClickListener { profileMenu() }
+                  }
+                  zoomOnFocus(profBtn)
+                  wifiBtn = iconBtn(R.drawable.ic_btn_wifi, "Wi-Fi", { pickSettingsPage("wifi") }) { toggleWifi() }
+                  btBtn = iconBtn(R.drawable.ic_btn_bt, "Bluetooth", { pickSettingsPage("bt") }) { toggleBt() }
+                  audBtn = iconBtn(R.drawable.ic_btn_audio, "Audio", { pickSettingsPage("audio") }) { openShortcut("audio") }
+                  vidBtn = iconBtn(R.drawable.ic_btn_video, "Video", { pickSettingsPage("video") }) { openShortcut("video") }
+                  moreBtn = iconBtn(R.drawable.ic_btn_more, "More") { quickMenu() }
+                  setBtn = iconBtn(R.drawable.ic_btn_tune, "Customize") { customize() }
+                  content.addView(btnBar)
+
+                  clock = TextView(this).apply {
+                      setTextColor(Color.WHITE)
+                      setShadowLayer(8f, 0f, 2f, 0x99000000.toInt())
+                      typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
+                  }
+                  date = TextView(this).apply {
+                      setTextColor(0xCCFFFFFF.toInt()); textSize = 13f
+                      setShadowLayer(8f, 0f, 2f, 0x99000000.toInt())
+                  }
+                  clockBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  clockBox.addView(clock); clockBox.addView(date)
+                  content.addView(clockBox)
+              }
+
+              private fun styleTop() {
+                  val szN = store.n("bsize")
+                  val sz = dp(szN)
+                  val gap = dp(store.n("bgap"))
+                  val a = if (look.glass) (100 - store.n("gtr")) / 100f else store.n("bopac") / 100f
+                  val col = tileColorOf(store.sel("bcolor"))
+                  val rad = when (store.sel("bshape")) { 0 -> -1f; 1 -> sz * 0.28f; else -> dp(6).toFloat() }
+                  val pad = (sz * 0.26f).toInt()
+                  val show = ArrayList<View>()
+                  if (store.sel("bprof") == 0) show.add(profBtn)
+                  show.add(wifiBtn); show.add(btBtn)
+                  if (store.sel("baud") == 0) show.add(audBtn)
+                  if (store.sel("bvid") == 0) show.add(vidBtn)
+                  if (store.sel("bmore") == 0) show.add(moreBtn)
+                  show.add(setBtn)
+                  btnBar.removeAllViews()
+                  for (v in show) {
+                      v.background = if (v === profBtn) TileBg(v, null, -1f, avatarCol, 1f, false, 0f)
+                      else TileBg(v, look.backdrop, rad, col, a, look.edge, dp(1).toFloat())
+                      if (v is ImageView) v.setPadding(pad, pad, pad, pad)
+                      btnBar.addView(v, LinearLayout.LayoutParams(sz, sz).apply { marginEnd = gap })
+                  }
+                  profBtn.textSize = szN * 0.4f
+                  val bp = store.sel("bpos")
+                  val g = when (bp) { 0 -> Gravity.START; 1 -> Gravity.CENTER_HORIZONTAL; else -> Gravity.END }
+                  btnBar.layoutParams = FrameLayout.LayoutParams(-2, -2, Gravity.TOP or g).apply {
+                      topMargin = dp(18); marginStart = dp(48); marginEnd = dp(48)
+                  }
+
+                  val cp = store.sel("cpos")
+                  clockBox.visibility = if (cp == 3) View.GONE else View.VISIBLE
+                  clock.textSize = store.n("csize").toFloat()
+                  date.visibility = if (store.sel("cdate") == 0) View.VISIBLE else View.GONE
+                  val cg = when (cp) { 1 -> Gravity.START; 2 -> Gravity.CENTER_HORIZONTAL; else -> Gravity.END }
+                  clockBox.gravity = cg
+                  val cside = when (cp) { 0 -> 2; 1 -> 0; else -> 1 }
+                  val same = cp != 3 && cside == bp
+                  clockBox.layoutParams = FrameLayout.LayoutParams(-2, -2, Gravity.TOP or cg).apply {
+                      topMargin = dp(14) + (if (same) sz + dp(8) else 0)
+                      marginStart = dp(48); marginEnd = dp(48)
+                  }
+              }
+
+              private fun statTv() = TextView(this).apply {
+                  setTextColor(0xEEFFFFFF.toInt())
+                  setShadowLayer(4f, 0f, 1f, 0x66000000)
+              }
+
+              private fun statBar(): ProgressBar {
+                  val b = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal)
+                  b.max = 100
+                  b.progressBackgroundTintList = ColorStateList.valueOf(0x33FFFFFF)
+                  return b
+              }
+
+              private fun statTile(tv: TextView, bar: ProgressBar): LinearLayout {
+                  val t = LinearLayout(this)
+                  t.orientation = LinearLayout.VERTICAL
+                  t.addView(tv)
+                  t.addView(bar, LinearLayout.LayoutParams(-1, dp(4)).apply { topMargin = dp(6) })
+                  return t
+              }
+
+              private fun buildStats() {
+                  cpuTv = statTv(); ramTv = statTv(); gpuTv = statTv()
+                  cpuBar = statBar(); ramBar = statBar(); gpuBar = statBar()
+                  cpuTile = statTile(cpuTv, cpuBar)
+                  ramTile = statTile(ramTv, ramBar)
+                  gpuTile = statTile(gpuTv, gpuBar)
+                  statsBox = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                  content.addView(statsBox)
+              }
+
+              private fun styleStats() {
+                  statsBox.visibility = if (store.sel("stats") == 0) View.VISIBLE else View.GONE
+                  val w = dp(store.n("sw"))
+                  val gap = dp(store.n("sgap"))
+                  val pad = dp(10)
+                  val a = if (look.glass) (100 - store.n("gtr")) / 100f else store.n("sopac") / 100f
+                  val col = tileColorOf(store.sel("scolor"))
+                  val rad = if (store.sel("sshape") == 1) -1f else dp(store.n("scorner")).toFloat()
+                  statsBox.removeAllViews()
+                  val tiles = listOf(cpuTile to "scpu", ramTile to "sram", gpuTile to "sgpu")
+                  for ((t, k) in tiles) {
+                      if (store.sel(k) != 0) continue
+                      t.background = TileBg(t, look.backdrop, rad, col, a, look.edge, dp(1).toFloat())
+                      t.setPadding(pad, pad, pad, pad)
+                      statsBox.addView(t, LinearLayout.LayoutParams(w, -2).apply { marginEnd = gap })
+                  }
+                  val ts = store.n("stext").toFloat()
+                  cpuTv.textSize = ts; ramTv.textSize = ts; gpuTv.textSize = ts
+                  val bc = when (store.sel("sbar")) { 0 -> null; 1 -> themeAccent(); else -> Color.WHITE }
+                  cpuBar.progressTintList = ColorStateList.valueOf(bc ?: 0xFF60A5FA.toInt())
+                  ramBar.progressTintList = ColorStateList.valueOf(bc ?: 0xFFA78BFA.toInt())
+                  gpuBar.progressTintList = ColorStateList.valueOf(bc ?: 0xFF34D399.toInt())
+                  val g = when (store.sel("spos")) { 0 -> Gravity.START; 1 -> Gravity.CENTER_HORIZONTAL; else -> Gravity.END }
+                  statsBox.layoutParams = FrameLayout.LayoutParams(-2, -2, Gravity.TOP or g).apply {
+                      topMargin = dp(store.n("sy")); marginStart = dp(48); marginEnd = dp(48)
+                  }
+              }
+
+              private fun buildRows() {
+                  val onFocus: (AppItem) -> Unit = { app ->
+                      if (!wallOn() && accents[store.sel("accent")] == null) applyTint(app.tint ?: defaultTint)
+                  }
+                  val onOpen: (AppItem, View) -> Unit = { app, v -> openApp(app, v) }
+                  val onMenu: (AppItem) -> Unit = { app -> appMenu(app) }
+                  aR = AppAdapter(look, onFocus, onOpen, onMenu)
+                  a1 = AppAdapter(look, onFocus, onOpen, onMenu)
+                  a2 = AppAdapter(look, onFocus, onOpen, onMenu)
+                  fun rowOf(a: AppAdapter) = RecyclerView(this).apply {
+                      layoutManager = LinearLayoutManager(this@MainActivity, RecyclerView.HORIZONTAL, false)
+                      adapter = a
+                      clipToPadding = false
+                      clipChildren = false
+                      setPadding(dp(48), dp(14), dp(48), dp(14))
+                      overScrollMode = View.OVER_SCROLL_NEVER
+                      itemAnimator = null
+                      addOnScrollListener(object : RecyclerView.OnScrollListener() {
+                          override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
+                              if (look.glass && look.backdrop != null) {
+                                  for (i in 0 until rv.childCount) (rv.getChildAt(i) as ViewGroup).getChildAt(0)?.invalidate()
+                              }
+                          }
+                      })
+                  }
+                  rowR = rowOf(aR); row1 = rowOf(a1); row2 = rowOf(a2)
+                  val bottom = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      clipChildren = false
+                      setPadding(0, 0, 0, dp(8))
+                  }
+                  bottom.addView(rowR, LinearLayout.LayoutParams(-1, -2))
+                  bottom.addView(row1, LinearLayout.LayoutParams(-1, -2))
+                  bottom.addView(row2, LinearLayout.LayoutParams(-1, -2))
+                  content.addView(bottom, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
+              }
+
+              // ---------- look, wallpaper, theme ----------
+              private fun wallFile() = File(filesDir, "wall_" + store.profile().getString("id") + ".jpg")
+
+              private fun wallOn(): Boolean = store.sel("wall") == 1 && wallBase != null
+
+              private fun themeAccent(): Int = accents[store.sel("accent")] ?: if (wallOn()) wallTint else 0xFF4F7CFF.toInt()
+
+              private fun tileColorOf(idx: Int): Int = if (idx == 3) themeAccent() else COLOR_VALS[idx]
+
+              private fun applyLook() {
+                  look.glass = store.sel("glass") == 1
+                  look.anim = store.sel("anim") == 0
+                  prepareBackground()
+                  baseBg.color = if (store.sel("bg") == 1) Color.BLACK else 0xFF05060B.toInt()
+
+                  look.radius = store.n("corner")
+                  look.circle = store.sel("tshape") == 1
+                  look.scale = store.n("focus") / 100f
+                  look.sheen = store.sel("sheen") == 0
+                  look.labels = store.sel("labels")
+                  look.dur = longArrayOf(0, 100, 160, 260, 420)[store.sel("fdur")]
+                  look.style = store.sel("fstyle")
+                  look.gap = store.n("gap")
+                  look.ring = store.sel("ring")
+                  look.ringColor = if (look.ring == 2) themeAccent() else Color.WHITE
+                  look.useIcon = store.sel("art") == 1
+                  val tr = store.n("gtr")
+                  look.fillColor = tileColorOf(store.sel("tcolor"))
+                  look.fillA = if (look.glass) (100 - tr) / 100f else store.n("topac") / 100f
+                  look.edge = look.glass && store.sel("gedge") == 0
+                  look.imgAlpha = if (look.glass) 0.45f + 0.55f * (100 - tr) / 100f else 1f
+
+                  val tw = store.n("tw")
+                  val small = tw * store.n("rs") / 100
+                  val ratio = floatArrayOf(0.5625f, 0.6667f, 0.75f, 1f)[store.sel("asp")]
+                  aR.cw = small; aR.ch = (small * ratio).toInt()
+                  a1.cw = tw; a1.ch = (tw * ratio).toInt()
+                  a2.cw = small; a2.ch = (small * ratio).toInt()
+                  for ((r, a) in listOf(rowR to aR, row1 to a1, row2 to a2)) { r.adapter = null; r.adapter = a }
+
+                  refreshProfile()
+                  styleTop()
+                  styleStats()
+                  val fixed = accents[store.sel("accent")]
+                  val base = fixed ?: if (wallOn()) wallTint else null
+                  if (base != null) applyTint(base) else paintGlow(curTint)
+                  updateTime()
+                  refreshToggles()
+                  render()
+              }
+
+              private fun prepareBackground() {
+                  val f = wallFile()
+                  if (store.sel("wall") != 1 || !f.exists()) { clearWall(); return }
+                  val key = f.path + f.lastModified()
+                  if (key != wallKey) {
+                      wallBase = loadCover(f)
+                      wallKey = key
+                      bdKey = ""
+                      val wb = wallBase
+                      if (wb != null) {
+                          val s = Bitmap.createScaledBitmap(wb, 32, 18, true)
+                          wallTint = dominant(s) ?: 0xFF4F7CFF.toInt()
+                          if (s !== wb) s.recycle()
+                      }
+                  }
+                  val base = wallBase
+                  if (base == null) { clearWall(); return }
+                  wallView.setImageBitmap(base)
+                  val dim = store.n("dim")
+                  scrim.setBackgroundColor((dim * 255 / 100) shl 24)
+                  scrim.visibility = View.VISIBLE
+                  if (look.glass) {
+                      val lvl = store.sel("gblur")
+                      val k2 = key + "|" + dim + "|" + lvl
+                      if (k2 != bdKey) { bdBmp = makeBackdrop(base, lvl, dim); bdKey = k2 }
+                      look.backdrop = bdBmp
+                  } else look.backdrop = null
+              }
+
+              private fun clearWall() {
+                  wallBase = null; wallKey = ""; bdBmp = null; bdKey = ""
+                  wallView.setImageDrawable(null)
+                  scrim.visibility = View.GONE
+                  look.backdrop = null
+              }
+
+              private fun loadCover(f: File): Bitmap? = try {
+                  val dm = resources.displayMetrics
+                  val tw = dm.widthPixels
+                  val th = dm.heightPixels
+                  val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                  BitmapFactory.decodeFile(f.path, o)
+                  var s = 1
+                  while (o.outWidth / (s * 2) >= tw && o.outHeight / (s * 2) >= th) s *= 2
+                  val opt = BitmapFactory.Options().apply { inSampleSize = s }
+                  val bmp = BitmapFactory.decodeFile(f.path, opt)
+                  if (bmp == null) null else {
+                      val scale = maxOf(tw.toFloat() / bmp.width, th.toFloat() / bmp.height)
+                      val out = Bitmap.createBitmap(tw, th, Bitmap.Config.ARGB_8888)
+                      val m = Matrix()
+                      m.postScale(scale, scale)
+                      m.postTranslate((tw - bmp.width * scale) / 2f, (th - bmp.height * scale) / 2f)
+                      Canvas(out).drawBitmap(bmp, m, Paint(Paint.FILTER_BITMAP_FLAG))
+                      bmp.recycle()
+                      out
+                  }
+              } catch (e: Exception) { null }
+
+              private fun makeBackdrop(base: Bitmap, lvl: Int, dim: Int): Bitmap {
+                  val w = base.width
+                  val h = base.height
+                  var bmp: Bitmap
+                  if (lvl == 0) {
+                      bmp = base.copy(Bitmap.Config.ARGB_8888, true)
+                  } else {
+                      val sw = maxOf(w / 8, 16)
+                      val sh = maxOf(h / 8, 9)
+                      val small = Bitmap.createScaledBitmap(base, sw, sh, true).copy(Bitmap.Config.ARGB_8888, true)
+                      val px = IntArray(sw * sh)
+                      small.getPixels(px, 0, sw, 0, 0, sw, sh)
+                      val tmp = IntArray(px.size)
+                      val r = lvl * 2
+                      for (pass in 0 until 2) {
+                          blur1d(px, tmp, sh, sw, sw, 1, r)
+                          blur1d(tmp, px, sw, sh, 1, sw, r)
+                      }
+                      small.setPixels(px, 0, sw, 0, 0, sw, sh)
+                      bmp = Bitmap.createScaledBitmap(small, w, h, true)
+                      if (!bmp.isMutable) bmp = bmp.copy(Bitmap.Config.ARGB_8888, true)
+                  }
+                  if (dim > 0) Canvas(bmp).drawColor((dim * 255 / 100) shl 24)
+                  return bmp
+              }
+
+              private fun blur1d(src: IntArray, dst: IntArray, lines: Int, len: Int, lineStep: Int, elemStep: Int, r: Int) {
+                  val div = 2 * r + 1
+                  for (ln in 0 until lines) {
+                      val base = ln * lineStep
+                      var ra = 0; var ga = 0; var ba = 0
+                      for (i in -r..r) {
+                          val p = src[base + i.coerceIn(0, len - 1) * elemStep]
+                          ra += (p shr 16) and 255; ga += (p shr 8) and 255; ba += p and 255
+                      }
+                      for (k in 0 until len) {
+                          dst[base + k * elemStep] = (0xFF shl 24) or ((ra / div) shl 16) or ((ga / div) shl 8) or (ba / div)
+                          val add = src[base + (k + r + 1).coerceAtMost(len - 1) * elemStep]
+                          val sub = src[base + (k - r).coerceAtLeast(0) * elemStep]
+                          ra += ((add shr 16) and 255) - ((sub shr 16) and 255)
+                          ga += ((add shr 8) and 255) - ((sub shr 8) and 255)
+                          ba += (add and 255) - (sub and 255)
+                      }
+                  }
+              }
+
+              private fun refreshProfile() {
+                  val p = store.profile()
+                  val name = p.getString("name")
+                  profBtn.text = name.take(1).uppercase()
+                  avatarCol = avatarColors[Math.abs(p.getString("id").hashCode()) % avatarColors.size]
+              }
+
+              private fun paintGlow(c: Int) {
+                  if (store.sel("aurora") != 0) {
+                      glowA.colors = intArrayOf(0, 0); glowB.colors = intArrayOf(0, 0)
+                      return
+                  }
+                  val k = floatArrayOf(0.6f, 1f, 1.5f)[store.sel("aurstr")] * (if (wallOn()) 0.75f else 1f)
+                  val al1 = (0x77 * k).toInt().coerceIn(0, 255)
+                  val al2 = (0x55 * k).toInt().coerceIn(0, 255)
+                  glowA.colors = intArrayOf((c and 0x00FFFFFF) or (al1 shl 24), 0x00000000)
+                  val hsv = FloatArray(3)
+                  Color.colorToHSV(c, hsv)
+                  hsv[0] = (hsv[0] + 50f) % 360f
+                  glowB.colors = intArrayOf((Color.HSVToColor(hsv) and 0x00FFFFFF) or (al2 shl 24), 0x00000000)
+              }
+
+              private fun applyTint(target: Int) {
+                  tintAnim?.cancel()
+                  if (!look.anim) { curTint = target; paintGlow(target); return }
+                  tintAnim = ValueAnimator.ofObject(ArgbEvaluator(), curTint, target).apply {
+                      duration = 400
+                      addUpdateListener { curTint = it.animatedValue as Int; paintGlow(curTint) }
+                      start()
+                  }
+              }
+
+              private fun dominant(bmp: Bitmap): Int? {
+                  var r = 0.0; var g = 0.0; var b = 0.0; var wSum = 0.0
+                  val hsv = FloatArray(3)
+                  for (x in 0 until bmp.width) for (y in 0 until bmp.height) {
+                      val px = bmp.getPixel(x, y)
+                      if (Color.alpha(px) < 128) continue
+                      Color.colorToHSV(px, hsv)
+                      val w = (hsv[1] * hsv[2]).toDouble() + 0.001
+                      r += Color.red(px) * w; g += Color.green(px) * w; b += Color.blue(px) * w; wSum += w
+                  }
+                  if (wSum <= 0.0) return null
+                  val avg = Color.rgb((r / wSum).toInt(), (g / wSum).toInt(), (b / wSum).toInt())
+                  Color.colorToHSV(avg, hsv)
+                  if (hsv[1] < 0.2f) return null
+                  hsv[1] = hsv[1].coerceAtLeast(0.55f)
+                  hsv[2] = hsv[2].coerceAtLeast(0.85f)
+                  return Color.HSVToColor(hsv)
+              }
+
+              private fun tintOf(src: Drawable): Int? = try {
+                  val dd = src.constantState?.newDrawable()?.mutate() ?: src
+                  val bmp = Bitmap.createBitmap(12, 12, Bitmap.Config.ARGB_8888)
+                  dd.setBounds(0, 0, 12, 12)
+                  dd.draw(Canvas(bmp))
+                  val res = dominant(bmp)
+                  bmp.recycle()
+                  res
+              } catch (e: Exception) { null }
+
+              // ---------- wallpaper picking ----------
+              private fun pickWallpaper() {
+                  try {
+                      startActivityForResult(
+                          Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType("image/*"), 78
+                      )
+                  } catch (e: Exception) {
+                      try {
+                          startActivityForResult(Intent(Intent.ACTION_GET_CONTENT).setType("image/*"), 78)
+                      } catch (e2: Exception) { galleryList() }
+                  }
+              }
+
+              private fun galleryList() {
+                  val perm = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_IMAGES else Manifest.permission.READ_EXTERNAL_STORAGE
+                  if (checkSelfPermission(perm) != PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(arrayOf(perm), 9)
+                      return
+                  }
+                  val items = ArrayList<MI>()
+                  try {
+                      val uri = MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                      contentResolver.query(
+                          uri, arrayOf(MediaStore.Images.Media._ID, MediaStore.Images.Media.DISPLAY_NAME),
+                          null, null, MediaStore.Images.Media.DATE_ADDED + " DESC"
+                      )?.use { c ->
+                          var n = 0
+                          while (c.moveToNext() && n < 60) {
+                              val id = c.getLong(0)
+                              val name = c.getString(1) ?: "image"
+                              items.add(MI(name) { copyWall(ContentUris.withAppendedId(uri, id)) })
+                              n++
+                          }
+                      }
+                  } catch (e: Exception) { }
+                  if (items.isEmpty()) { toast("No pictures found on this TV"); return }
+                  showMenu("Pick a wallpaper", items, back = { themeMenu() }, side = true)
+              }
+
+              private fun folderWall() {
+                  val f = File(getExternalFilesDir(null), "wallpaper.jpg")
+                  if (f.exists()) copyWall(Uri.fromFile(f))
+                  else toast("Put wallpaper.jpg in: " + (getExternalFilesDir(null)?.path ?: "Android/data/com.cine.launcher/files"))
+              }
+
+              private fun copyWall(uri: Uri) {
+                  io.execute {
+                      try {
+                          val dm = resources.displayMetrics
+                          val o = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                          contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, o) }
+                          var s = 1
+                          while (o.outWidth / (s * 2) >= dm.widthPixels && o.outHeight / (s * 2) >= dm.heightPixels) s *= 2
+                          val bmp = contentResolver.openInputStream(uri)?.use {
+                              BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = s })
+                          }
+                          if (bmp == null) { runOnUiThread { toast("Couldn't read that picture") }; return@execute }
+                          FileOutputStream(wallFile()).use { bmp.compress(Bitmap.CompressFormat.JPEG, 92, it) }
+                          bmp.recycle()
+                          runOnUiThread { store.put("wall", "1"); applyLook(); toast("Wallpaper set") }
+                      } catch (e: Exception) { runOnUiThread { toast("Couldn't set the wallpaper") } }
+                  }
+              }
+
+              // ---------- app list ----------
+              private fun render() {
+                  val hidden = store.list("hidden")
+                  val rev = store.sel("sort") == 1
+                  fun s(l: List<AppItem>) = if (rev) l.sortedByDescending { it.label.lowercase() } else l.sortedBy { it.label.lowercase() }
+                  val vis = master.filter { it.pkg !in hidden }
+                  var list = s(vis.filter { it.pkg.isNotEmpty() && isLean(it) }) + s(vis.filter { !isLean(it) })
+                  val ord = store.list("order")
+                  if (ord.isNotEmpty()) list = list.sortedBy { val i = ord.indexOf(it.pkg); if (i < 0) Int.MAX_VALUE else i }
+                  shown = list
+                  val n = intArrayOf(4, 6, 8, 10, 12)[store.sel("count")]
+                  when (store.sel("layout")) {
+                      0 -> {
+                          aR.items = if (store.sel("toprow") == 0) store.list("recent").mapNotNull { p -> list.firstOrNull { it.pkg == p } } else emptyList()
+                          a1.items = list; a2.items = emptyList()
+                      }
+                      1 -> { aR.items = emptyList(); a1.items = list.take(n); a2.items = list.drop(n) }
+                      else -> { aR.items = emptyList(); a1.items = list; a2.items = emptyList() }
+                  }
+                  aR.notifyDataSetChanged(); a1.notifyDataSetChanged(); a2.notifyDataSetChanged()
+                  rowR.visibility = if (aR.items.isEmpty()) View.GONE else View.VISIBLE
+                  row2.visibility = if (a2.items.isEmpty()) View.GONE else View.VISIBLE
+                  if (overlay == null) row1.post {
+                      if (focusPending || currentFocus == null) { if (row1.getChildAt(0)?.requestFocus() == true) focusPending = false }
+                  }
+              }
+
+              private val leanPkgs = HashSet<String>()
+              private fun isLean(a: AppItem) = a.pkg in leanPkgs
+
+              private fun loadApps() {
+                  io.execute {
+                      val pm = packageManager
+                      val seen = HashSet<String>()
+                      val result = ArrayList<AppItem>()
+                      val lean = HashSet<String>()
+                      fun add(cat: String, isLeanCat: Boolean) {
+                          val apps = pm.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(cat), 0)
+                              .filter { it.activityInfo.packageName != packageName }
+                          for (ri in apps) {
+                              val pkg = ri.activityInfo.packageName
+                              if (!seen.add(pkg)) continue
+                              val banner = ri.activityInfo.loadBanner(pm) ?: ri.activityInfo.applicationInfo.loadBanner(pm)
+                              val icon = ri.loadIcon(pm)
+                              val img = banner ?: icon
+                              val intent = Intent(Intent.ACTION_MAIN)
+                                  .setClassName(pkg, ri.activityInfo.name)
+                                  .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                              if (isLeanCat) lean.add(pkg)
+                              result.add(AppItem(ri.loadLabel(pm).toString(), pkg, intent, img, icon, banner != null, tintOf(img)))
+                          }
+                      }
+                      add(Intent.CATEGORY_LEANBACK_LAUNCHER, true)
+                      add(Intent.CATEGORY_LAUNCHER, false)
+                      runOnUiThread { leanPkgs.clear(); leanPkgs.addAll(lean); master = result; render() }
+                  }
+              }
+
+              private fun recordRecent(pk: String) {
+                  val l = listOf(pk) + store.list("recent").filter { it != pk }
+                  store.put("recent", l.take(8).joinToString(","))
+              }
+
+              private fun launchOpts(v: View?): Bundle? = try {
+                  when (store.sel("aopen")) {
+                      1 -> if (v != null) ActivityOptions.makeScaleUpAnimation(v, 0, 0, v.width, v.height).toBundle() else null
+                      2 -> ActivityOptions.makeCustomAnimation(this, R.anim.c_fade_in, R.anim.c_fade_out).toBundle()
+                      3 -> ActivityOptions.makeCustomAnimation(this, R.anim.c_slide_up_in, R.anim.c_hold).toBundle()
+                      4 -> ActivityOptions.makeCustomAnimation(this, R.anim.c_slide_left_in, R.anim.c_slide_left_out).toBundle()
+                      5 -> ActivityOptions.makeCustomAnimation(this, R.anim.c_zoom_in, R.anim.c_fade_out).toBundle()
+                      6 -> ActivityOptions.makeCustomAnimation(this, R.anim.c_zoom_out_in, R.anim.c_fade_out).toBundle()
+                      7 -> ActivityOptions.makeCustomAnimation(this, 0, 0).toBundle()
+                      else -> null
+                  }
+              } catch (e: Exception) { null }
+
+              private fun launchApp(a: AppItem, v: View?) {
+                  try { startActivity(a.intent, launchOpts(v)); recordRecent(a.pkg) } catch (e: Exception) { toast("Can't open " + a.label) }
+              }
+
+              private fun openApp(a: AppItem, v: View?) {
+                  val f = splitFirst
+                  splitFirst = null
+                  if (f != null && f.pkg != a.pkg) {
+                      try {
+                          startActivity(f.intent); recordRecent(f.pkg)
+                          handler.postDelayed({
+                              try {
+                                  startActivity(Intent(a.intent).addFlags(Intent.FLAG_ACTIVITY_LAUNCH_ADJACENT or Intent.FLAG_ACTIVITY_MULTIPLE_TASK))
+                                  recordRecent(a.pkg)
+                              } catch (e: Exception) { toast("Couldn't open the second app") }
+                          }, 900)
+                      } catch (e: Exception) { toast("Couldn't open the first app") }
+                  } else launchApp(a, v)
+              }
+
+              private fun splitSupported(): Boolean = try {
+                  val id = Resources.getSystem().getIdentifier("config_supportsSplitScreenMultiWindow", "bool", "android")
+                  id != 0 && Resources.getSystem().getBoolean(id)
+              } catch (e: Exception) { false }
+
+              private fun startSplit(a: AppItem) {
+                  if (!splitSupported()) { toast("This TV's system doesn't support split screen"); return }
+                  splitFirst = a
+                  toast("Now pick the second app")
+              }
+
+              private fun saveOrder(l: List<String>) { store.put("order", l.joinToString(",")); render() }
+
+              private fun move(pk: String, dir: Int) {
+                  val l = shown.map { it.pkg }.toMutableList()
+                  val i = l.indexOf(pk)
+                  val j = i + dir
+                  if (i < 0 || j < 0 || j >= l.size) return
+                  Collections.swap(l, i, j)
+                  saveOrder(l)
+              }
+
+              // ---------- menus ----------
+              private fun adur(): Long = longArrayOf(150, 250, 400)[store.sel("adur")]
+
+              private fun animIn(ov: View, panel: View) {
+                  val m = store.sel("wopen")
+                  if (!look.anim || m == 0) return
+                  val d = adur()
+                  val ip = DecelerateInterpolator()
+                  ov.alpha = 0f
+                  ov.animate().alpha(1f).setDuration(d).start()
+                  when (m) {
+                      2 -> { panel.scaleX = 0.85f; panel.scaleY = 0.85f; panel.animate().scaleX(1f).scaleY(1f).setInterpolator(ip).setDuration(d).start() }
+                      3 -> { panel.translationY = dp(60).toFloat(); panel.animate().translationY(0f).setInterpolator(ip).setDuration(d).start() }
+                      4 -> { panel.translationX = dp(120).toFloat(); panel.animate().translationX(0f).setInterpolator(ip).setDuration(d).start() }
+                  }
+              }
+
+              private fun animOut(ov: View, panel: View?, end: () -> Unit) {
+                  val m = store.sel("wclose")
+                  if (!look.anim || m == 0 || panel == null) { end(); return }
+                  val d = adur()
+                  ov.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                  when (m) {
+                      2 -> panel.animate().scaleX(0.85f).scaleY(0.85f).setDuration(d).start()
+                      3 -> panel.animate().translationY(dp(60).toFloat()).setDuration(d).start()
+                      4 -> panel.animate().translationX(dp(120).toFloat()).setDuration(d).start()
+                  }
+                  ov.animate().alpha(0f).setDuration(d).withEndAction { end() }.start()
+              }
+
+              private fun rowVal(mi: MI): String {
+                  val t = mi.value?.invoke() ?: ""
+                  return if (mi.adj != null) "\u2039  $t  \u203A" else t
+              }
+
+              private var overlayPanel: View? = null
+
+              private fun showMenu(title: String, items: List<MI>, back: (() -> Unit)? = null, side: Boolean = false) {
+                  menuBack = back
+                  val old = overlay
+                  if (old == null) {
+                      val fb = focusBefore
+                      if (fb == null || !fb.isAttachedToWindow) focusBefore = currentFocus
+                  } else root.removeView(old)
+                  val panel = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(dp(20), dp(18), dp(20), dp(14))
+                  }
+                  panel.background = TileBg(
+                      panel, look.backdrop, dp(18).toFloat(), 0xFF121826.toInt(),
+                      if (look.glass) 0.55f else 0.95f, look.edge, dp(1).toFloat()
+                  )
+                  panel.addView(TextView(this).apply {
+                      text = title; setTextColor(Color.WHITE); textSize = 20f
+                      typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                      setPadding(dp(8), 0, 0, dp(10))
+                  })
+                  val list = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                  var first: View? = null
+                  for (mi in items) {
+                      val row = LinearLayout(this).apply {
+                          orientation = LinearLayout.HORIZONTAL
+                          gravity = Gravity.CENTER_VERTICAL
+                          setPadding(dp(14), 0, dp(14), 0)
+                          isFocusable = true
+                          background = pillBg(10)
+                      }
+                      val l = TextView(this).apply { text = mi.label; setTextColor(Color.WHITE); textSize = 16f; maxLines = 1 }
+                      val v = TextView(this).apply { text = rowVal(mi); setTextColor(0xFF9DB4FF.toInt()); textSize = 15f }
+                      row.addView(l, LinearLayout.LayoutParams(0, -2, 1f))
+                      row.addView(v)
+                      val adj = mi.adj
+                      if (adj != null) row.setOnKeyListener { _, code, ev ->
+                          if (ev.action == KeyEvent.ACTION_DOWN && (code == KeyEvent.KEYCODE_DPAD_LEFT || code == KeyEvent.KEYCODE_DPAD_RIGHT)) {
+                              adj(if (code == KeyEvent.KEYCODE_DPAD_LEFT) -1 else 1)
+                              v.text = rowVal(mi)
+                              true
+                          } else false
+                      }
+                      row.setOnClickListener {
+                          if (mi.keep) { mi.run(); v.text = rowVal(mi) } else { closeMenu(); mi.run() }
+                      }
+                      list.addView(row, LinearLayout.LayoutParams(-1, dp(46)))
+                      if (first == null) first = row
+                  }
+                  val sv = ScrollView(this).apply { isVerticalScrollBarEnabled = false; addView(list) }
+                  panel.addView(sv, LinearLayout.LayoutParams(-1, minOf(dp(46) * items.size, dp(340))))
+                  val ov = FrameLayout(this).apply {
+                      setBackgroundColor(if (side) 0x30000000 else 0xB3000000.toInt())
+                      isClickable = true
+                  }
+                  val lp = if (side) FrameLayout.LayoutParams(dp(440), -2, Gravity.END or Gravity.CENTER_VERTICAL).apply { marginEnd = dp(40) }
+                  else FrameLayout.LayoutParams(dp(440), -2, Gravity.CENTER)
+                  ov.addView(panel, lp)
+                  overlay = ov
+                  overlayPanel = panel
+                  root.addView(ov, FrameLayout.LayoutParams(-1, -1))
+                  content.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                  first?.requestFocus()
+                  if (old == null) animIn(ov, panel)
+              }
+
+              private fun closeMenu() {
+                  val ov = overlay ?: return
+                  val panel = overlayPanel
+                  overlay = null
+                  overlayPanel = null
+                  menuBack = null
+                  content.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+                  animOut(ov, panel) {
+                      root.removeView(ov)
+                      if (overlay == null) {
+                          val f = focusBefore
+                          focusBefore = null
+                          if (f != null && f.isAttachedToWindow) f.requestFocus() else row1.post { row1.getChildAt(0)?.requestFocus() }
+                      }
+                  }
+              }
+
+              private fun sys(action: String) {
+                  try { startActivity(Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                  catch (e: Exception) {
+                      try { startActivity(Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                      catch (e2: Exception) { toast("Settings aren't available") }
+                  }
+              }
+
+              private fun appMenu(app: AppItem) {
+                  val pk = app.pkg
+                  val uri = Uri.parse("package:" + pk)
+                  val items = arrayListOf(
+                      MI("Open") { launchApp(app, null) },
+                      MI("Pin to front") { saveOrder(listOf(pk) + shown.map { it.pkg }.filter { it != pk }) },
+                      MI("Move left") { move(pk, -1) },
+                      MI("Move right") { move(pk, 1) },
+                      MI("Hide from home") { store.put("hidden", (store.list("hidden") + pk).joinToString(",")); render() },
+                      MI("Open side by side with\u2026") { startSplit(app) },
+                      MI("App info") { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) },
+                      MI("Uninstall") { startActivity(Intent(Intent.ACTION_DELETE, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                  )
+                  showMenu(app.label, items)
+              }
+
+              // ---------- customization menus ----------
+              private fun optItems(group: String): ArrayList<MI> {
+                  val items = ArrayList<MI>()
+                  for (o in OPTS) {
+                      if (o.group != group) continue
+                      val n = o.choices.size
+                      items.add(MI(o.title, value = { o.choices[store.sel(o.key)] }, keep = true,
+                          adj = { dir -> store.put(o.key, ((store.sel(o.key) + dir + n) % n).toString()); applyLook() }) {
+                          store.put(o.key, ((store.sel(o.key) + 1) % n).toString())
+                          applyLook()
+                      })
+                  }
+                  return items
+              }
+
+              private fun section(title: String, group: String, head: List<MI> = emptyList()) {
+                  val items = ArrayList<MI>()
+                  items.addAll(head)
+                  items.addAll(optItems(group))
+                  items.add(MI("Reset this section", keep = true) {
+                      for (o in OPTS) if (o.group == group) store.put(o.key, o.def.toString())
+                      applyLook()
+                      section(title, group, head)
+                  })
+                  showMenu(title + "   (\u25C0 \u25B6 to adjust)", items, back = { customize() }, side = true)
+              }
+
+              private fun themeMenu() {
+                  val head = listOf(
+                      MI("Choose wallpaper picture\u2026") { pickWallpaper() },
+                      MI("Load wallpaper.jpg from app folder") { folderWall() },
+                      MI("Remove wallpaper", keep = true) { wallFile().delete(); store.put("wall", "0"); applyLook(); themeMenu() }
+                  )
+                  section("Wallpaper & theme", "Theme", head)
+              }
+
+              private fun customize() {
+                  val items = arrayListOf(
+                      MI("Wallpaper & theme", keep = true) { themeMenu() },
+                      MI("Glass mode (blur & transparency)", keep = true) { section("Glass mode", "Glass") },
+                      MI("App tiles & layout", keep = true) { section("App tiles & layout", "Tiles") },
+                      MI("Focus & animations", keep = true) { section("Focus & animations", "Anim") },
+                      MI("Top buttons & clock", keep = true) { section("Top buttons & clock", "Buttons") },
+                      MI("CPU / RAM / GPU tiles", keep = true) { section("CPU / RAM / GPU tiles", "System") },
+                      MI("Unhide all apps") { store.put("hidden", ""); render() },
+                      MI("Reset app order") { store.put("order", ""); render() },
+                      MI("Reset ALL customization") { for (o in OPTS) store.put(o.key, o.def.toString()); applyLook() },
+                      MI("Android system settings") { sys(Settings.ACTION_SETTINGS) }
+                  )
+                  showMenu("Customize", items, side = true)
+              }
+
+              // ---------- profiles ----------
+              private fun profileMenu() {
+                  val a = store.profiles()
+                  val items = ArrayList<MI>()
+                  for (i in 0 until a.length()) {
+                      val o = a.getJSONObject(i)
+                      val id = o.getString("id")
+                      val mail = o.optString("email")
+                      val label = (if (id == store.cur) "\u25CF " else "") + o.getString("name") + (if (mail.isEmpty()) "" else "  \u00B7  " + mail)
+                      items.add(MI(label) { store.cur = id; applyLook() })
+                  }
+                  items.add(MI("Add profile") { store.addProfile("Profile " + (a.length() + 1)); applyLook() })
+                  items.add(MI("Rename profile") { askName() })
+                  items.add(MI("Link Google account") { pickAccount() })
+                  if (a.length() > 1) items.add(MI("Delete this profile") { store.deleteCurrent(); applyLook() })
+                  showMenu("Profiles", items)
+              }
+
+              private fun askName() {
+                  val et = EditText(this)
+                  et.setText(store.profile().getString("name"))
+                  et.setSingleLine()
+                  AlertDialog.Builder(this)
+                      .setTitle("Profile name")
+                      .setView(et)
+                      .setPositiveButton("Save") { _, _ ->
+                          val n = et.text.toString().trim()
+                          if (n.isNotEmpty()) { store.update { it.put("name", n) }; applyLook() }
+                      }
+                      .setNegativeButton("Cancel", null)
+                      .show()
+              }
+
+              private fun pickAccount() {
+                  try {
+                      val i = if (Build.VERSION.SDK_INT >= 26)
+                          AccountManager.newChooseAccountIntent(null, null, arrayOf("com.google"), null, null, null, null)
+                      else
+                          @Suppress("DEPRECATION") AccountManager.newChooseAccountIntent(null, null, arrayOf("com.google"), false, null, null, null, null)
+                      startActivityForResult(i, 77)
+                  } catch (e: Exception) { toast("The account picker isn't available on this TV") }
+              }
+
+              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+                  super.onActivityResult(requestCode, resultCode, data)
+                  if (requestCode == 77 && resultCode == RESULT_OK) {
+                      val mail = data?.getStringExtra(AccountManager.KEY_ACCOUNT_NAME)
+                      if (mail != null) { store.update { it.put("email", mail) }; refreshProfile(); styleTop() }
+                  }
+                  if (requestCode == 78 && resultCode == RESULT_OK) {
+                      data?.data?.let { copyWall(it) }
+                  }
+              }
+
+              override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+                  super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+                  if (requestCode == 9 && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) galleryList()
+              }
+
+              // ---------- toggles ----------
+              private fun wifiOn(): Boolean = try {
+                  (applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager).isWifiEnabled
+              } catch (e: Exception) { false }
+
+              private fun btOn(): Boolean = try { BluetoothAdapter.getDefaultAdapter()?.isEnabled == true } catch (e: Exception) { false }
+
+              private fun activeCol(): Int = when (store.sel("bon")) {
+                  0 -> 0xFF4ADE80.toInt()
+                  1 -> themeAccent()
+                  2 -> Color.WHITE
+                  else -> 0xFF60A5FA.toInt()
+              }
+
+              private fun refreshToggles() {
+                  wifiBtn.setColorFilter(if (wifiOn()) activeCol() else 0x88FFFFFF.toInt())
+                  btBtn.setColorFilter(if (btOn()) activeCol() else 0x88FFFFFF.toInt())
+              }
+
+              private fun toggleWifi() {
+                  var ok = false
+                  try {
+                      val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                      @Suppress("DEPRECATION")
+                      ok = wm.setWifiEnabled(!wm.isWifiEnabled)
+                  } catch (e: Exception) { ok = false }
+                  if (!ok) openShortcut("wifi")
+                  handler.postDelayed({ refreshToggles() }, 1500)
+              }
+
+              // Android 13+ stops normal apps from switching Bluetooth, so when the switch is refused we open the real Bluetooth page.
+              private fun toggleBt() {
+                  var ok = false
+                  try {
+                      val a = BluetoothAdapter.getDefaultAdapter()
+                      if (a == null) { toast("No Bluetooth on this TV"); return }
+                      @Suppress("DEPRECATION")
+                      ok = if (a.isEnabled) a.disable() else a.enable()
+                  } catch (e: Exception) { ok = false }
+                  if (!ok) openShortcut("bt")
+                  handler.postDelayed({ refreshToggles() }, 1500)
+              }
+
+              private fun outputs(): String = try {
+                  val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                  val names = am.getDevices(AudioManager.GET_DEVICES_OUTPUTS).mapNotNull {
+                      when (it.type) {
+                          AudioDeviceInfo.TYPE_HDMI -> "HDMI"
+                          AudioDeviceInfo.TYPE_HDMI_ARC -> "HDMI ARC"
+                          AudioDeviceInfo.TYPE_BLUETOOTH_A2DP -> "Bluetooth"
+                          AudioDeviceInfo.TYPE_BUILTIN_SPEAKER -> "TV speakers"
+                          AudioDeviceInfo.TYPE_WIRED_HEADPHONES, AudioDeviceInfo.TYPE_WIRED_HEADSET -> "Headphones"
+                          AudioDeviceInfo.TYPE_USB_DEVICE, AudioDeviceInfo.TYPE_USB_HEADSET -> "USB"
+                          else -> null
+                      }
+                  }.distinct()
+                  if (names.isEmpty()) "none found" else names.joinToString(", ")
+              } catch (e: Exception) { "unknown" }
+
+              private fun inputsMenu() {
+                  val items = ArrayList<MI>()
+                  try {
+                      val tm = getSystemService(Context.TV_INPUT_SERVICE) as TvInputManager
+                      for (info in tm.tvInputList) {
+                          if (!info.isPassthroughInput) continue
+                          val label = (info.loadCustomLabel(this) ?: info.loadLabel(this)).toString()
+                          val id = info.id
+                          items.add(MI(label) {
+                              try {
+                                  startActivity(Intent(Intent.ACTION_VIEW, TvContract.buildChannelUriForPassthroughInput(id)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                              } catch (e: Exception) { toast("Couldn't switch to " + label) }
+                          })
+                      }
+                  } catch (e: Exception) { }
+                  if (items.isEmpty()) items.add(MI("No inputs found. Open TV settings") { sys(Settings.ACTION_SETTINGS) })
+                  showMenu("Switch input", items)
+              }
+
+              private fun quickMenu() {
+                  val am = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+                  val items = arrayListOf(
+                      MI("Wi-Fi", value = { if (wifiOn()) "On" else "Off" }, keep = true) { toggleWifi() },
+                      MI("Bluetooth", value = { if (btOn()) "On" else "Off" }, keep = true) { toggleBt() },
+                      MI("Mute", value = { if (am.isStreamMute(AudioManager.STREAM_MUSIC)) "On" else "Off" }, keep = true) {
+                          am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_TOGGLE_MUTE, AudioManager.FLAG_SHOW_UI)
+                      },
+                      MI("Volume up", keep = true) { am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_RAISE, AudioManager.FLAG_SHOW_UI) },
+                      MI("Volume down", keep = true) { am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI) },
+                      MI("Audio output", value = { outputs() }) { openShortcut("audio") },
+                      MI("Video input (HDMI, AV)") { inputsMenu() },
+                      MI("Display settings") { openShortcut("video") },
+                      MI("Screen saver") { sys("android.settings.DREAM_SETTINGS") },
+                      MI("Split screen", value = { if (splitSupported()) "Supported" else "Not supported" }) {
+                          toast(if (splitSupported()) "Hold OK on an app, then Open side by side" else "This TV's system doesn't allow split screen")
+                      }
+                  )
+                  showMenu("More", items)
+              }
+
+              // ---------- direct settings shortcuts ----------
+              private val settingsPkgs = listOf("com.xiaomi.mitv.settings", "com.android.tv.settings", "com.android.settings")
+
+              private fun kindWords(kind: String): List<String> = when (kind) {
+                  "bt" -> listOf("bluetooth", "accessor")
+                  "wifi" -> listOf("wifi", "wlan")
+                  "audio" -> listOf("sound", "audio")
+                  else -> listOf("display", "picture", "video")
+              }
+
+              private fun settingsCands(kind: String): List<Intent> {
+                  val l = ArrayList<Intent>()
+                  when (kind) {
+                      "bt" -> {
+                          l.add(Intent().setClassName("com.android.tv.settings", "com.android.tv.settings.accessories.AddAccessoryActivity"))
+                          l.add(Intent().setClassName("com.android.tv.settings", "com.android.tv.settings.accessories.BluetoothAccessoryActivity"))
+                          l.add(Intent().setClassName("com.android.tv.settings", "com.android.tv.settings.accessories.AccessoriesActivity"))
+                          l.add(Intent(Settings.ACTION_BLUETOOTH_SETTINGS))
+                      }
+                      "wifi" -> {
+                          l.add(Intent(Settings.ACTION_WIFI_SETTINGS))
+                          l.add(Intent().setClassName("com.android.tv.settings", "com.android.tv.settings.connectivity.WifiSettingsActivity"))
+                      }
+                      "audio" -> {
+                          l.add(Intent(Settings.ACTION_SOUND_SETTINGS))
+                          l.add(Intent().setClassName("com.android.tv.settings", "com.android.tv.settings.device.sound.SoundActivity"))
+                      }
+                      else -> {
+                          l.add(Intent(Settings.ACTION_DISPLAY_SETTINGS))
+                          l.add(Intent().setClassName("com.android.tv.settings", "com.android.tv.settings.device.display.DisplayActivity"))
+                      }
+                  }
+                  return l
+              }
+
+              private fun findActs(words: List<String>): List<Intent> {
+                  val out = ArrayList<Intent>()
+                  for (pkg in settingsPkgs) {
+                      try {
+                          val acts = packageManager.getPackageInfo(pkg, PackageManager.GET_ACTIVITIES).activities ?: continue
+                          for (a in acts) {
+                              if (!a.exported || !a.enabled) continue
+                              val n = a.name.lowercase()
+                              if (words.any { n.contains(it) }) out.add(Intent().setClassName(pkg, a.name))
+                          }
+                      } catch (e: Exception) { }
+                  }
+                  return out
+              }
+
+              private fun openShortcut(kind: String) {
+                  val saved = store.gget("sc_" + kind)
+                  if (saved.contains("/")) {
+                      try {
+                          startActivity(Intent().setClassName(saved.substringBefore("/"), saved.substringAfter("/")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                          return
+                      } catch (e: Exception) { }
+                  }
+                  val all = ArrayList<Intent>()
+                  all.addAll(settingsCands(kind))
+                  all.addAll(findActs(kindWords(kind)))
+                  for (i in all) {
+                      i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                      if (i.resolveActivity(packageManager) != null) {
+                          try { startActivity(i); return } catch (e: Exception) { }
+                      }
+                  }
+                  toast("No direct page found. Hold OK on this button to pick one.")
+                  sys(Settings.ACTION_SETTINGS)
+              }
+
+              private fun pickSettingsPage(kind: String) {
+                  val words = kindWords(kind)
+                  val all = ArrayList<Pair<String, String>>()
+                  for (pkg in settingsPkgs) {
+                      try {
+                          val acts = packageManager.getPackageInfo(pkg, PackageManager.GET_ACTIVITIES).activities ?: continue
+                          for (a in acts) {
+                              if (!a.exported || !a.enabled) continue
+                              all.add(pkg to a.name)
+                          }
+                      } catch (e: Exception) { }
+                  }
+                  val filtered = all.filter { p -> words.any { p.second.lowercase().contains(it) } }
+                  val use = if (filtered.isEmpty()) all else filtered
+                  val items = ArrayList<MI>()
+                  items.add(MI("Use default (reset)") { store.gput("sc_" + kind, ""); toast("Back to default") })
+                  for ((pkg, nm) in use) {
+                      items.add(MI(pkg.substringAfterLast('.') + ": " + nm.substringAfterLast('.')) {
+                          store.gput("sc_" + kind, pkg + "/" + nm)
+                          openShortcut(kind)
+                      })
+                  }
+                  showMenu("Pick the page this button opens", items)
+              }
+
+              // ---------- system stats ----------
+              private fun statSet(tv: TextView, bar: ProgressBar, name: String, v: Int?, approx: Boolean) {
+                  tv.text = if (v == null) name + " n/a" else name + (if (approx) " ~" else " ") + v + "%"
+                  bar.progress = v ?: 0
+              }
+
+              private fun updateStats() {
+                  if (statsBox.visibility != View.VISIBLE) return
+                  cpuApprox = false
+                  gpuApprox = false
+                  statSet(cpuTv, cpuBar, "CPU", cpuPct(), cpuApprox)
+                  val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                  val mi = ActivityManager.MemoryInfo()
+                  am.getMemoryInfo(mi)
+                  val used = if (mi.totalMem > 0) (100 * (mi.totalMem - mi.availMem) / mi.totalMem).toInt() else null
+                  statSet(ramTv, ramBar, "RAM", used, false)
+                  statSet(gpuTv, gpuBar, "GPU", gpuPct(), gpuApprox)
+              }
+
+              private fun cpuPct(): Int? {
+                  try {
+                      val line = File("/proc/stat").bufferedReader().use { it.readLine() } ?: return null
+                      val n = line.trim().split(Regex("\\s+")).drop(1).mapNotNull { it.toLongOrNull() }
+                      if (n.size >= 5) {
+                          val idle = n[3] + n[4]
+                          val total = n.sum()
+                          val dT = total - prevTotal
+                          val dI = idle - prevIdle
+                          val first = prevTotal == 0L
+                          prevTotal = total; prevIdle = idle
+                          if (!first && dT > 0) return (100 * (dT - dI) / dT).toInt().coerceIn(0, 100)
+                      }
+                  } catch (e: Exception) { }
+                  cpuApprox = true
+                  return freqPct()
+              }
+
+              private fun freqPct(): Int? = try {
+                  var cur = 0L
+                  var max = 0L
+                  for (i in 0 until 16) {
+                      val b = "/sys/devices/system/cpu/cpu" + i + "/cpufreq/"
+                      val c = File(b + "scaling_cur_freq")
+                      val m = File(b + "cpuinfo_max_freq")
+                      if (c.canRead() && m.canRead()) {
+                          cur += c.readText().trim().toLong()
+                          max += m.readText().trim().toLong()
+                      }
+                  }
+                  if (max > 0) (100 * cur / max).toInt().coerceIn(0, 100) else null
+              } catch (e: Exception) { null }
+
+              private val gpuFiles = listOf(
+                  "/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage", "/sys/class/kgsl/kgsl-3d0/devfreq/gpu_load",
+                  "/sys/class/mpgpu/utilization", "/sys/kernel/ged/hal/gpu_utilization",
+                  "/sys/class/misc/mali0/device/utilisation", "/sys/devices/platform/mali.0/utilization"
+              )
+
+              private fun gpuPct(): Int? {
+                  for (p in gpuFiles) {
+                      try {
+                          val f = File(p)
+                          if (f.canRead()) {
+                              val m = Regex("\\d+").find(f.readText())
+                              if (m != null) return m.value.toInt().coerceIn(0, 100)
+                          }
+                      } catch (e: Exception) { }
+                  }
+                  try {
+                      val dirs = File("/sys/class/devfreq").listFiles() ?: return null
+                      for (d in dirs) {
+                          val nm = d.name.lowercase()
+                          if (!(nm.contains("mali") || nm.contains("gpu"))) continue
+                          val c = File(d, "cur_freq")
+                          val m = File(d, "max_freq")
+                          if (c.canRead() && m.canRead()) {
+                              gpuApprox = true
+                              return (100 * c.readText().trim().toLong() / m.readText().trim().toLong()).toInt().coerceIn(0, 100)
+                          }
+                      }
+                  } catch (e: Exception) { }
+                  return null
+              }
+
+              // ---------- lifecycle ----------
+              override fun onStart() {
+                  super.onStart()
+                  val f = IntentFilter().apply {
+                      addAction(Intent.ACTION_PACKAGE_ADDED)
+                      addAction(Intent.ACTION_PACKAGE_REMOVED)
+                      addAction(Intent.ACTION_PACKAGE_REPLACED)
+                      addDataScheme("package")
+                  }
+                  if (Build.VERSION.SDK_INT >= 33) registerReceiver(pkgReceiver, f, Context.RECEIVER_EXPORTED)
+                  else registerReceiver(pkgReceiver, f)
+                  loadApps()
+                  handler.post(tick)
+                  handler.post(statsTick)
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  if (launchedAway) { launchedAway = false; playReturn() }
+              }
+
+              override fun onStop() {
+                  super.onStop()
+                  launchedAway = true
+                  unregisterReceiver(pkgReceiver)
+                  handler.removeCallbacks(tick)
+                  handler.removeCallbacks(statsTick)
+              }
+
+              // Animates the home screen coming back after an app closes. The closing animation of the other app belongs to that app / the system.
+              private fun playReturn() {
+                  val m = store.sel("aclose")
+                  if (!look.anim || m == 0) return
+                  val d = adur() + 100
+                  val c = content
+                  c.animate().cancel()
+                  val ip = DecelerateInterpolator()
+                  when (m) {
+                      1 -> { c.alpha = 0f; c.animate().alpha(1f).setInterpolator(ip).setDuration(d).start() }
+                      2 -> { c.scaleX = 1.1f; c.scaleY = 1.1f; c.alpha = 0f; c.animate().scaleX(1f).scaleY(1f).alpha(1f).setInterpolator(ip).setDuration(d).start() }
+                      3 -> { c.scaleX = 0.9f; c.scaleY = 0.9f; c.alpha = 0f; c.animate().scaleX(1f).scaleY(1f).alpha(1f).setInterpolator(ip).setDuration(d).start() }
+                      4 -> { c.translationY = dp(80).toFloat(); c.alpha = 0f; c.animate().translationY(0f).alpha(1f).setInterpolator(ip).setDuration(d).start() }
+                      5 -> { c.translationY = -dp(80).toFloat(); c.alpha = 0f; c.animate().translationY(0f).alpha(1f).setInterpolator(ip).setDuration(d).start() }
+                  }
+              }
+
+              override fun onNewIntent(intent: Intent?) {
+                  super.onNewIntent(intent)
+                  if (overlay != null) closeMenu()
+                  focusPending = true
+                  row1.scrollToPosition(0)
+                  row1.post { row1.getChildAt(0)?.requestFocus() }
+              }
+
+              @Deprecated("Home screen: back only closes menus")
+              override fun onBackPressed() {
+                  if (overlay != null) {
+                      val b = menuBack
+                      if (b != null) b() else closeMenu()
+                  } else splitFirst = null
+              }
+
+              private fun updateTime() {
+                  val now = Date()
+                  clock.text = DateFormat.getTimeFormat(this).format(now)
+                  date.text = SimpleDateFormat("EEEE, d MMMM", Locale.getDefault()).format(now)
+              }
+          }
+          CINE_EOF
+          mkdir -p app/src/main/java/com/cine/launcher
           cat > app/src/main/java/com/cine/launcher/Prefs.kt <<'CINE_EOF'
           package com.cine.launcher
 
           import android.content.Context
+          import android.graphics.Bitmap
           import org.json.JSONArray
           import org.json.JSONObject
 
           class Look {
               var radius = 18
-              var scale = 1.13f
+              var circle = false
+              var scale = 1.12f
               var sheen = true
               var labels = 0
               var anim = true
-              var glassMode = false
+              var dur = 160L
+              var style = 0
+              var glass = false
+              var fillColor = 0xFF1E2434.toInt()
+              var fillA = 1f
+              var edge = false
+              var backdrop: Bitmap? = null
+              var ring = 0
+              var ringColor = 0xFFFFFFFF.toInt()
+              var useIcon = false
+              var imgAlpha = 1f
+              var gap = 24
           }
 
-          class Opt(val key: String, val title: String, val choices: List<String>, val def: Int)
+          class Opt(
+              val key: String, val title: String, val choices: List<String>, val def: Int,
+              val group: String, val from: Int = 0, val step: Int = 1
+          )
+
+          fun numOpt(key: String, title: String, lo: Int, hi: Int, stp: Int, defVal: Int, group: String, suffix: String = ""): Opt =
+              Opt(key, title, (lo..hi step stp).map { it.toString() + suffix }, (defVal - lo) / stp, group, lo, stp)
+
+          val COLOR_NAMES = listOf("Slate", "Black", "White", "Accent", "Blue", "Purple", "Red", "Green", "Orange", "Pink", "Teal")
+          val COLOR_VALS = intArrayOf(
+              0xFF1E2434.toInt(), 0xFF000000.toInt(), 0xFFFFFFFF.toInt(), 0,
+              0xFF3B82F6.toInt(), 0xFF8B5CF6.toInt(), 0xFFEF4444.toInt(), 0xFF22C55E.toInt(),
+              0xFFF59E0B.toInt(), 0xFFEC4899.toInt(), 0xFF14B8A6.toInt()
+          )
+          val OnOff = listOf("On", "Off")
+          val ShowHide = listOf("Show", "Hide")
 
           val OPTS = listOf(
-              Opt("accent", "Glow color", listOf("Auto (Wallpaper/Icon)", "Blue", "Purple", "Red", "Green", "Orange", "Pink", "Teal"), 0),
-              Opt("bg", "Background Mode", listOf("Aurora Gradient", "Solid Dark", "Pure Black", "Custom Wallpaper"), 0),
-              Opt("aurora_blend", "Aurora Overlay", listOf("Off", "Blend with Background"), 1),
-              Opt("glass", "Glass Mode (Translucency)", listOf("Off", "Enabled (70%-80% Glass)"), 0),
-              Opt("layout", "Layout Style", listOf("Top row + apps", "Two rows", "Single row"), 0),
-              Opt("toprow", "Top row content", listOf("Recent apps", "Off"), 0),
-              Opt("stats", "System Stats (CPU/RAM/GPU)", listOf("Show", "Hide"), 0),
-              Opt("size", "Tile Size", listOf("Small", "Medium", "Large"), 1),
-              Opt("count", "Tiles per row", listOf("4", "6", "8", "10", "12"), 2),
-              Opt("corner", "Tile Shape / Corners", listOf("Square", "Rounded", "Round"), 1),
-              Opt("focus", "Focus Zoom", listOf("Subtle", "Normal", "Big"), 1),
-              Opt("sheen", "Focus Shine", listOf("On", "Off"), 0),
-              Opt("labels", "App Labels", listOf("On focus", "Always", "Hidden"), 0),
-              Opt("sort", "Sort order", listOf("A to Z", "Z to A"), 0),
-              Opt("clock", "Header greeting", listOf("Show", "Hide"), 0),
-              Opt("greet", "Greeting text", listOf("Show", "Hide"), 0),
-              Opt("anim", "Animations", listOf("On", "Off"), 0)
+              // ---- Theme ----
+              Opt("wall", "Wallpaper", listOf("Off", "On"), 0, "Theme"),
+              Opt("aurora", "Aurora glow", OnOff, 0, "Theme"),
+              Opt("aurstr", "Aurora strength", listOf("Soft", "Medium", "Strong"), 1, "Theme"),
+              Opt("bg", "Base color", listOf("Dark", "Black"), 0, "Theme"),
+              Opt("accent", "Accent color", listOf("Auto (wallpaper / app)", "Blue", "Purple", "Red", "Green", "Orange", "Pink", "Teal"), 0, "Theme"),
+              numOpt("dim", "Wallpaper dim", 0, 80, 10, 30, "Theme", "%"),
+              // ---- Glass ----
+              Opt("glass", "Glass mode", listOf("Off", "On"), 0, "Glass"),
+              numOpt("gtr", "Glass transparency", 30, 95, 5, 75, "Glass", "%"),
+              Opt("gblur", "Glass blur", listOf("Off", "Light", "Medium", "Strong", "Max"), 2, "Glass"),
+              Opt("gedge", "Glass edge shine", OnOff, 0, "Glass"),
+              // ---- Tiles ----
+              Opt("layout", "Layout", listOf("Recent row + apps", "Two rows", "Single row"), 0, "Tiles"),
+              Opt("toprow", "Top row shows", listOf("Recent apps", "Off"), 0, "Tiles"),
+              Opt("count", "Apps in big row", listOf("4", "6", "8", "10", "12"), 2, "Tiles"),
+              Opt("sort", "Sort apps", listOf("A to Z", "Z to A"), 0, "Tiles"),
+              numOpt("tw", "Tile width", 120, 320, 8, 208, "Tiles", " dp"),
+              numOpt("rs", "Small row size", 60, 100, 5, 75, "Tiles", "%"),
+              Opt("asp", "Tile shape ratio", listOf("16:9", "3:2", "4:3", "1:1"), 0, "Tiles"),
+              numOpt("gap", "Tile spacing", 8, 48, 4, 24, "Tiles", " dp"),
+              Opt("tshape", "Tile shape", listOf("Rounded", "Circle / pill"), 0, "Tiles"),
+              numOpt("corner", "Corner radius", 0, 60, 2, 18, "Tiles", " dp"),
+              Opt("tcolor", "Tile color", COLOR_NAMES, 0, "Tiles"),
+              numOpt("topac", "Tile opacity", 20, 100, 5, 100, "Tiles", "%"),
+              Opt("art", "Tile artwork", listOf("Banner", "Icon"), 0, "Tiles"),
+              Opt("labels", "App names", listOf("On focus", "Always", "Hidden"), 0, "Tiles"),
+              // ---- Focus & animation ----
+              Opt("anim", "Animations", OnOff, 0, "Anim"),
+              Opt("fdur", "Focus speed", listOf("Instant", "Fast", "Normal", "Slow", "Very slow"), 2, "Anim"),
+              Opt("fstyle", "Focus style", listOf("Smooth zoom", "Bounce", "Lift and zoom", "Snap"), 0, "Anim"),
+              numOpt("focus", "Focus zoom", 100, 140, 2, 112, "Anim", "%"),
+              Opt("sheen", "Focus shine", OnOff, 0, "Anim"),
+              Opt("ring", "Focus outline", listOf("Off", "White", "Accent"), 0, "Anim"),
+              Opt("aopen", "App open animation", listOf("System default", "Zoom from tile", "Fade", "Slide up", "Slide left", "Zoom in", "Zoom out", "None"), 1, "Anim"),
+              Opt("aclose", "Return-to-home animation", listOf("None", "Fade in", "Zoom out", "Zoom in", "Slide up", "Slide down"), 1, "Anim"),
+              Opt("wopen", "Menu open animation", listOf("None", "Fade", "Zoom", "Slide up", "Slide from right"), 1, "Anim"),
+              Opt("wclose", "Menu close animation", listOf("None", "Fade", "Zoom out", "Slide down", "Slide to right"), 1, "Anim"),
+              Opt("adur", "Window animation speed", listOf("Fast", "Normal", "Slow"), 1, "Anim"),
+              // ---- Buttons & clock ----
+              Opt("bpos", "Buttons position", listOf("Left", "Center", "Right"), 0, "Buttons"),
+              numOpt("bsize", "Button size", 32, 72, 4, 48, "Buttons", " dp"),
+              Opt("bshape", "Button shape", listOf("Circle", "Rounded", "Square"), 0, "Buttons"),
+              Opt("bcolor", "Button color", COLOR_NAMES, 2, "Buttons"),
+              numOpt("bopac", "Button opacity", 10, 100, 5, 20, "Buttons", "%"),
+              Opt("bon", "Active (on) icon color", listOf("Green", "Accent", "White", "Blue"), 0, "Buttons"),
+              numOpt("bgap", "Button spacing", 4, 24, 4, 12, "Buttons", " dp"),
+              numOpt("bzoom", "Button focus zoom", 100, 140, 2, 108, "Buttons", "%"),
+              Opt("bprof", "Profile button", ShowHide, 0, "Buttons"),
+              Opt("baud", "Audio button", ShowHide, 0, "Buttons"),
+              Opt("bvid", "Video button", ShowHide, 0, "Buttons"),
+              Opt("bmore", "More button", ShowHide, 0, "Buttons"),
+              Opt("cpos", "Clock position", listOf("Right", "Left", "Center", "Hidden"), 0, "Buttons"),
+              numOpt("csize", "Clock size", 20, 60, 2, 34, "Buttons", " sp"),
+              Opt("cdate", "Date", ShowHide, 0, "Buttons"),
+              // ---- CPU / RAM / GPU tiles ----
+              Opt("stats", "System tiles", ShowHide, 0, "System"),
+              Opt("scpu", "CPU tile", ShowHide, 0, "System"),
+              Opt("sram", "RAM tile", ShowHide, 0, "System"),
+              Opt("sgpu", "GPU tile", ShowHide, 0, "System"),
+              Opt("spos", "Position", listOf("Left", "Center", "Right"), 2, "System"),
+              numOpt("sy", "Vertical position", 40, 200, 8, 88, "System", " dp"),
+              numOpt("sw", "Tile width", 56, 160, 8, 96, "System", " dp"),
+              Opt("sshape", "Shape", listOf("Rounded", "Circle / pill"), 0, "System"),
+              numOpt("scorner", "Corner radius", 0, 40, 2, 14, "System", " dp"),
+              Opt("scolor", "Tile color", COLOR_NAMES, 2, "System"),
+              numOpt("sopac", "Tile opacity", 10, 100, 5, 20, "System", "%"),
+              numOpt("sgap", "Tile spacing", 4, 24, 4, 12, "System", " dp"),
+              Opt("sbar", "Bar color", listOf("Preset", "Accent", "White"), 0, "System"),
+              numOpt("stext", "Text size", 9, 18, 1, 11, "System", " sp")
           )
+          val OPT: Map<String, Opt> = OPTS.associateBy { it.key }
 
           class Store(ctx: Context) {
               private val sp = ctx.getSharedPreferences("cine", Context.MODE_PRIVATE)
@@ -212,470 +1910,165 @@ jobs:
               fun list(k: String): List<String> = get(k, "").split(",").filter { it.isNotEmpty() }
 
               fun sel(key: String): Int {
-                  val o = OPTS.firstOrNull { it.key == key } ?: return 0
+                  val o = OPT.getValue(key)
                   return (get(key, o.def.toString()).toIntOrNull() ?: o.def).coerceIn(0, o.choices.size - 1)
               }
+
+              fun n(key: String): Int {
+                  val o = OPT.getValue(key)
+                  return o.from + sel(key) * o.step
+              }
           }
           CINE_EOF
-          mkdir -p app/src/main/java/com/cine/launcher
-          cat > app/src/main/java/com/cine/launcher/AppAdapter.kt <<'CINE_EOF'
-          package com.cine.launcher
-
-          import android.content.Intent
-          import android.graphics.Color
-          import android.graphics.Outline
-          import android.graphics.Typeface
-          import android.graphics.drawable.Drawable
-          import android.graphics.drawable.GradientDrawable
-          import android.text.TextUtils
-          import android.view.Gravity
-          import android.view.View
-          import android.view.ViewGroup
-          import android.view.ViewOutlineProvider
-          import android.widget.FrameLayout
-          import android.widget.ImageView
-          import android.widget.LinearLayout
-          import android.widget.TextView
-          import androidx.recyclerview.widget.RecyclerView
-
-          data class AppItem(
-              val label: String,
-              val pkg: String,
-              val intent: Intent,
-              val image: Drawable,
-              val isBanner: Boolean,
-              val tint: Int?,
-              val lean: Boolean,
-              val badge: String? = null,
-              val meta: String? = null,
-              val overview: String? = null
-          )
-
-          class AppAdapter(
-              private val look: Look,
-              private val onFocus: (AppItem) -> Unit,
-              private val onOpen: (AppItem) -> Unit,
-              private val onMenu: (AppItem) -> Unit
-          ) : RecyclerView.Adapter<AppAdapter.VH>() {
-
-              var items: List<AppItem> = emptyList()
-              var cw = 208
-              var ch = 117
-
-              class VH(
-                  val root: LinearLayout, val card: FrameLayout, val img: ImageView,
-                  val sheen: View, val badge: TextView, val label: TextView
-              ) : RecyclerView.ViewHolder(root)
-
-              override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
-                  val c = parent.context
-                  val d = c.resources.displayMetrics.density
-                  fun dp(v: Int) = (v * d).toInt()
-                  val radius = dp(look.radius).toFloat()
-
-                  val cardBgStart = if (look.glassMode) 0xB01C2233.toInt() else 0xFF262C3D.toInt()
-                  val cardBgEnd = if (look.glassMode) 0x80141824.toInt() else 0xFF141824.toInt()
-
-                  val root = LinearLayout(c).apply {
-                      orientation = LinearLayout.VERTICAL
-                      gravity = Gravity.CENTER_HORIZONTAL
-                      clipChildren = false
-                      layoutParams = RecyclerView.LayoutParams(dp(cw), -2).apply { marginEnd = dp(22) }
-                  }
-                  val card = FrameLayout(c).apply {
-                      layoutParams = LinearLayout.LayoutParams(dp(cw), dp(ch))
-                      background = GradientDrawable(
-                          GradientDrawable.Orientation.TL_BR, intArrayOf(cardBgStart, cardBgEnd)
-                      ).apply { cornerRadius = radius }
-                      outlineProvider = object : ViewOutlineProvider() {
-                          override fun getOutline(v: View, o: Outline) { o.setRoundRect(0, 0, v.width, v.height, radius) }
-                      }
-                      clipToOutline = true
-                      isFocusable = true
-                      isFocusableInTouchMode = false
-                  }
-                  val img = ImageView(c).apply { layoutParams = FrameLayout.LayoutParams(-1, -1) }
-                  val sheen = View(c).apply {
-                      layoutParams = FrameLayout.LayoutParams(-1, -1)
-                      background = GradientDrawable(
-                          GradientDrawable.Orientation.TL_BR,
-                          intArrayOf(0x55FFFFFF, 0x10FFFFFF, 0x00FFFFFF)
-                      )
-                      alpha = 0f
-                  }
-                  val badge = TextView(c).apply {
-                      layoutParams = FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.START).apply { topMargin = dp(6); marginStart = dp(6) }
-                      setTextColor(Color.WHITE)
-                      textSize = 10f
-                      typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-                      setPadding(dp(6), dp(2), dp(6), dp(2))
-                      background = GradientDrawable().apply { setColor(0xCC000000.toInt()); cornerRadius = dp(6).toFloat() }
-                      visibility = View.GONE
-                  }
-                  card.addView(img); card.addView(sheen); card.addView(badge)
-
-                  val label = TextView(c).apply {
-                      layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) }
-                      gravity = Gravity.CENTER
-                      setTextColor(Color.WHITE)
-                      textSize = 14f
-                      typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-                      maxLines = 1
-                      ellipsize = TextUtils.TruncateAt.END
-                  }
-                  root.addView(card); root.addView(label)
-                  return VH(root, card, img, sheen, badge, label)
-              }
-
-              override fun onBindViewHolder(h: VH, position: Int) {
-                  val item = items[position]
-                  val d = h.card.resources.displayMetrics.density
-                  h.img.setImageDrawable(item.image)
-                  if (item.isBanner) {
-                      h.img.scaleType = ImageView.ScaleType.CENTER_CROP
-                      h.img.setPadding(0, 0, 0, 0)
-                  } else {
-                      val pad = (ch * 0.2f * d).toInt()
-                      h.img.scaleType = ImageView.ScaleType.FIT_CENTER
-                      h.img.setPadding(pad, pad, pad, pad)
-                  }
-                  h.label.text = item.label
-                  if (item.badge != null) { h.badge.text = item.badge; h.badge.visibility = View.VISIBLE } else h.badge.visibility = View.GONE
-                  h.label.visibility = if (look.labels == 2) View.GONE else View.VISIBLE
-                  h.card.scaleX = 1f; h.card.scaleY = 1f; h.card.translationZ = 0f
-                  h.sheen.alpha = 0f
-                  h.label.alpha = if (look.labels == 1) 1f else 0f
-
-                  h.card.setOnFocusChangeListener { v, focused ->
-                      val s = if (focused) look.scale else 1f
-                      val dur = if (look.anim) 160L else 0L
-                      v.animate().scaleX(s).scaleY(s).translationZ(if (focused) 28 * d else 0f).setDuration(dur).start()
-                      if (look.sheen) h.sheen.animate().alpha(if (focused) 1f else 0f).setDuration(dur).start()
-                      if (look.labels == 0) h.label.animate().alpha(if (focused) 1f else 0f).setDuration(dur).start()
-                      if (focused) onFocus(item)
-                  }
-                  h.card.setOnClickListener { onOpen(item) }
-                  h.card.setOnLongClickListener { onMenu(item); true }
-              }
-
-              override fun getItemCount() = items.size
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/ic_btn_audio.xml <<'CINE_EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="24dp" android:height="24dp"
+              android:viewportWidth="24" android:viewportHeight="24">
+              <path android:fillColor="#FFFFFFFF" android:pathData="M3,9v6h4l5,5V4L7,9H3zM16.5,12c0,-1.77 -1.02,-3.29 -2.5,-4.03v8.05c1.48,-0.73 2.5,-2.25 2.5,-4.02zM14,3.23v2.06c2.89,0.86 5,3.54 5,6.71s-2.11,5.85 -5,6.71v2.06c4.01,-0.91 7,-4.49 7,-8.77s-2.99,-7.86 -7,-8.77z" />
+          </vector>
+          CINE_EOF
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/ic_btn_bt.xml <<'CINE_EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="24dp" android:height="24dp"
+              android:viewportWidth="24" android:viewportHeight="24">
+              <path android:fillColor="#FFFFFFFF" android:pathData="M17.71,7.71L12,2h-1v7.59L6.41,5 5,6.41 10.59,12 5,17.59 6.41,19 11,14.41V22h1l5.71,-5.71 -4.3,-4.29 4.3,-4.29zM13,5.83l1.88,1.88L13,9.59V5.83zM14.88,16.29L13,18.17v-3.76l1.88,1.88z" />
+          </vector>
+          CINE_EOF
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/ic_btn_more.xml <<'CINE_EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="24dp" android:height="24dp"
+              android:viewportWidth="24" android:viewportHeight="24">
+              <path android:fillColor="#FFFFFFFF" android:pathData="M4,8h4V4H4v4zM10,20h4v-4h-4v4zM4,20h4v-4H4v4zM4,14h4v-4H4v4zM10,14h4v-4h-4v4zM16,4v4h4V4h-4zM10,8h4V4h-4v4zM16,14h4v-4h-4v4zM16,20h4v-4h-4v4z" />
+          </vector>
+          CINE_EOF
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/ic_btn_tune.xml <<'CINE_EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="24dp" android:height="24dp"
+              android:viewportWidth="24" android:viewportHeight="24">
+              <path android:fillColor="#FFFFFFFF" android:pathData="M3,17v2h6v-2H3zM3,5v2h10V5H3zM13,21v-2h8v-2h-8v-2h-2v6h2zM7,9v2H3v2h4v2h2V9H7zM21,13v-2H11v2h10zM15,9h2V7h4V5h-4V3h-2v6z" />
+          </vector>
+          CINE_EOF
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/ic_btn_video.xml <<'CINE_EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="24dp" android:height="24dp"
+              android:viewportWidth="24" android:viewportHeight="24">
+              <path android:fillColor="#FFFFFFFF" android:pathData="M21,3H3c-1.1,0 -2,0.9 -2,2v12c0,1.1 0.9,2 2,2h5v2h8v-2h5c1.1,0 1.99,-0.9 1.99,-2L23,5c0,-1.1 -0.9,-2 -2,-2zM21,17H3V5h18v12z" />
+          </vector>
+          CINE_EOF
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/ic_btn_wifi.xml <<'CINE_EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="24dp" android:height="24dp"
+              android:viewportWidth="24" android:viewportHeight="24">
+              <path android:fillColor="#FFFFFFFF" android:pathData="M1,9l2,2c4.97,-4.97 13.03,-4.97 18,0l2,-2C16.93,2.93 7.08,2.93 1,9zM9,17l3,3 3,-3c-1.65,-1.66 -4.34,-1.66 -6,0zM5,13l2,2c2.76,-2.76 7.24,-2.76 10,0l2,-2C15.14,9.14 8.87,9.14 5,13z" />
+          </vector>
+          CINE_EOF
+          mkdir -p app/src/main/res/anim
+          cat > app/src/main/res/anim/c_fade_in.xml <<'CINE_EOF'
+          <alpha xmlns:android="http://schemas.android.com/apk/res/android" android:fromAlpha="0" android:toAlpha="1" android:duration="300" />
+          CINE_EOF
+          mkdir -p app/src/main/res/anim
+          cat > app/src/main/res/anim/c_fade_out.xml <<'CINE_EOF'
+          <alpha xmlns:android="http://schemas.android.com/apk/res/android" android:fromAlpha="1" android:toAlpha="0" android:duration="300" />
+          CINE_EOF
+          mkdir -p app/src/main/res/anim
+          cat > app/src/main/res/anim/c_hold.xml <<'CINE_EOF'
+          <alpha xmlns:android="http://schemas.android.com/apk/res/android" android:fromAlpha="1" android:toAlpha="1" android:duration="300" />
+          CINE_EOF
+          mkdir -p app/src/main/res/anim
+          cat > app/src/main/res/anim/c_slide_left_in.xml <<'CINE_EOF'
+          <translate xmlns:android="http://schemas.android.com/apk/res/android"
+              android:fromXDelta="100%p" android:toXDelta="0" android:duration="320"
+              android:interpolator="@android:interpolator/decelerate_cubic" />
+          CINE_EOF
+          mkdir -p app/src/main/res/anim
+          cat > app/src/main/res/anim/c_slide_left_out.xml <<'CINE_EOF'
+          <translate xmlns:android="http://schemas.android.com/apk/res/android"
+              android:fromXDelta="0" android:toXDelta="-30%p" android:duration="320"
+              android:interpolator="@android:interpolator/decelerate_cubic" />
+          CINE_EOF
+          mkdir -p app/src/main/res/anim
+          cat > app/src/main/res/anim/c_slide_up_in.xml <<'CINE_EOF'
+          <translate xmlns:android="http://schemas.android.com/apk/res/android"
+              android:fromYDelta="100%p" android:toYDelta="0" android:duration="320"
+              android:interpolator="@android:interpolator/decelerate_cubic" />
+          CINE_EOF
+          mkdir -p app/src/main/res/anim
+          cat > app/src/main/res/anim/c_zoom_in.xml <<'CINE_EOF'
+          <set xmlns:android="http://schemas.android.com/apk/res/android" android:interpolator="@android:interpolator/decelerate_cubic">
+              <scale android:fromXScale="0.85" android:toXScale="1" android:fromYScale="0.85" android:toYScale="1"
+                  android:pivotX="50%" android:pivotY="50%" android:duration="300" />
+              <alpha android:fromAlpha="0" android:toAlpha="1" android:duration="300" />
+          </set>
+          CINE_EOF
+          mkdir -p app/src/main/res/anim
+          cat > app/src/main/res/anim/c_zoom_out_in.xml <<'CINE_EOF'
+          <set xmlns:android="http://schemas.android.com/apk/res/android" android:interpolator="@android:interpolator/decelerate_cubic">
+              <scale android:fromXScale="1.2" android:toXScale="1" android:fromYScale="1.2" android:toYScale="1"
+                  android:pivotX="50%" android:pivotY="50%" android:duration="300" />
+              <alpha android:fromAlpha="0" android:toAlpha="1" android:duration="300" />
+          </set>
+          CINE_EOF
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/banner.xml <<'CINE_EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="320dp" android:height="180dp"
+              android:viewportWidth="320" android:viewportHeight="180">
+              <path android:fillColor="#0A0E1A" android:pathData="M0,0h320v180h-320z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M140,60L196,90L140,120z" />
+          </vector>
+          CINE_EOF
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/ic_launcher.xml <<'CINE_EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#0A0E1A" android:pathData="M0,0h108v108h-108z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M42,34L76,54L42,74z" />
+          </vector>
+          CINE_EOF
+          mkdir -p app/src/main/res/values
+          cat > app/src/main/res/values/themes.xml <<'CINE_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <style name="Theme.Cine" parent="android:Theme.Material.NoActionBar">
+                  <item name="android:windowBackground">@android:color/black</item>
+                  <item name="android:windowAnimationStyle">@null</item>
+                  <item name="android:statusBarColor">@android:color/transparent</item>
+                  <item name="android:navigationBarColor">@android:color/transparent</item>
+              </style>
+          </resources>
+          CINE_EOF
+          cat > build.gradle.kts <<'CINE_EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
           }
           CINE_EOF
-          mkdir -p app/src/main/java/com/cine/launcher
-          cat > app/src/main/java/com/cine/launcher/MainActivity.kt <<'CINE_EOF'
-          package com.cine.launcher
+          cat > gradle.properties <<'CINE_EOF'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          CINE_EOF
+          cat > settings.gradle.kts <<'CINE_EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "CineLauncher"
+          include(":app")
+          CINE_EOF
 
-          import android.Manifest
-          import android.app.ActivityManager
-          import android.content.res.ColorStateList
-          import android.graphics.BitmapFactory
-          import android.graphics.Paint
-          import android.graphics.drawable.BitmapDrawable
-          import android.widget.ProgressBar
-          import org.json.JSONArray
-          import org.json.JSONObject
-          import java.io.File
-          import android.accounts.AccountManager
-          import android.animation.ArgbEvaluator
-          import android.animation.ValueAnimator
-          import android.app.Activity
-          import android.app.AlertDialog
-          import android.bluetooth.BluetoothAdapter
-          import android.content.BroadcastReceiver
-          import android.content.Context
-          import android.content.Intent
-          import android.content.IntentFilter
-          import android.content.pm.PackageManager
-          import android.graphics.Bitmap
-          import android.graphics.Canvas
-          import android.graphics.Color
-          import android.graphics.Typeface
-          import android.graphics.drawable.ColorDrawable
-          import android.graphics.drawable.Drawable
-          import android.graphics.drawable.GradientDrawable
-          import android.graphics.drawable.LayerDrawable
-          import android.graphics.drawable.StateListDrawable
-          import android.media.AudioDeviceInfo
-          import android.media.AudioManager
-          import android.net.Uri
-          import android.net.wifi.WifiManager
-          import android.os.Build
-          import android.os.Bundle
-          import android.os.Handler
-          import android.os.Looper
-          import android.provider.Settings
-          import android.text.TextUtils
-          import android.text.format.DateFormat
-          import android.util.StateSet
-          import android.view.Gravity
-          import android.view.View
-          import android.view.ViewGroup
-          import android.widget.EditText
-          import android.widget.FrameLayout
-          import android.widget.ImageView
-          import android.widget.LinearLayout
-          import android.widget.ScrollView
-          import android.widget.TextView
-          import android.widget.Toast
-          import androidx.recyclerview.widget.LinearLayoutManager
-          import androidx.recyclerview.widget.RecyclerView
-          import java.text.SimpleDateFormat
-          import java.util.Calendar
-          import java.util.Collections
-          import java.util.Date
-          import java.util.Locale
-          import java.util.concurrent.Executors
-
-          class MI(val label: String, val value: (() -> String)? = null, val keep: Boolean = false, val run: () -> Unit)
-
-          class MainActivity : Activity() {
-
-              private lateinit var store: Store
-              private val look = Look()
-              private lateinit var root: FrameLayout
-              private lateinit var content: FrameLayout
-              private var overlay: View? = null
-              private var focusBefore: View? = null
-
-              private lateinit var clock: TextView
-              private lateinit var date: TextView
-              private lateinit var greeting: TextView
-              private lateinit var heroBox: View
-              private lateinit var chipAvatar: TextView
-              private lateinit var chipName: TextView
-              private lateinit var chipMail: TextView
-              private lateinit var wifiPill: View
-              private lateinit var btPill: View
-              private lateinit var wifiStatusTv: TextView
-              private lateinit var btStatusTv: TextView
-              private lateinit var rowR: RecyclerView
-              private lateinit var row1: RecyclerView
-              private lateinit var row2: RecyclerView
-              private lateinit var aR: AppAdapter
-              private lateinit var a1: AppAdapter
-              private lateinit var a2: AppAdapter
-              private lateinit var glowA: GradientDrawable
-              private lateinit var glowB: GradientDrawable
-              private lateinit var baseBg: ColorDrawable
-              private lateinit var bgImageView: ImageView
-              private lateinit var statsBox: LinearLayout
-              private lateinit var cpuTv: TextView
-              private lateinit var cpuBar: ProgressBar
-              private lateinit var ramTv: TextView
-              private lateinit var ramBar: ProgressBar
-              private lateinit var gpuTv: TextView
-              private lateinit var gpuBar: ProgressBar
-              private var prevTotal = 0L
-              private var prevIdle = 0L
-              private var cpuApprox = false
-              private var gpuApprox = false
-              private val statsTick = object : Runnable { override fun run() { updateStats(); handler.postDelayed(this, 2000) } }
-              private var focusPending = true
-
-              private val handler = Handler(Looper.getMainLooper())
-              private val io = Executors.newSingleThreadExecutor()
-              private val defaultTint = 0xFF3B4CCA.toInt()
-              private val accents = arrayOf<Int?>(
-                  null, 0xFF3B82F6.toInt(), 0xFF8B5CF6.toInt(), 0xFFEF4444.toInt(),
-                  0xFF22C55E.toInt(), 0xFFF59E0B.toInt(), 0xFFEC4899.toInt(), 0xFF14B8A6.toInt()
-              )
-              private val avatarColors = intArrayOf(0xFF3B4CCA.toInt(), 0xFF0F9D7A.toInt(), 0xFFD9480F.toInt(), 0xFF9C36B5.toInt(), 0xFFC2255C.toInt())
-              private var curTint = defaultTint
-              private var bgMode = 0
-              private var tintAnim: ValueAnimator? = null
-              private var master: List<AppItem> = emptyList()
-              private var shown: List<AppItem> = emptyList()
-              private var splitFirst: AppItem? = null
-
-              private val tick = object : Runnable {
-                  override fun run() { updateTime(); refreshToggles(); handler.postDelayed(this, 15_000) }
-              }
-              private val pkgReceiver = object : BroadcastReceiver() {
-                  override fun onReceive(c: Context, i: Intent) { loadApps() }
-              }
-
-              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
-              private fun toast(m: String) { Toast.makeText(this, m, Toast.LENGTH_SHORT).show() }
-
-              override fun onCreate(savedInstanceState: Bundle?) {
-                  super.onCreate(savedInstanceState)
-                  store = Store(this)
-                  val dm = resources.displayMetrics
-                  fun glow(cx: Float, cy: Float, r: Float) = GradientDrawable().apply {
-                      gradientType = GradientDrawable.RADIAL_GRADIENT
-                      setGradientCenter(cx, cy)
-                      gradientRadius = r
-                  }
-                  glowA = glow(0.18f, 0.05f, dm.widthPixels * 0.8f)
-                  glowB = glow(0.95f, 0.6f, dm.widthPixels * 0.6f)
-                  baseBg = ColorDrawable(0xFF05060B.toInt())
-                  
-                  bgImageView = ImageView(this).apply { scaleType = ImageView.ScaleType.CENTER_CROP }
-                  root = FrameLayout(this).apply {
-                      addView(bgImageView, FrameLayout.LayoutParams(-1, -1))
-                      background = LayerDrawable(arrayOf(baseBg, glowA, glowB))
-                  }
-                  content = FrameLayout(this).apply { clipChildren = false }
-                  root.addView(content, FrameLayout.LayoutParams(-1, -1))
-                  
-                  buildTopBarAndClock()
-                  buildHeroAndStats()
-                  buildRows()
-                  setContentView(root)
-                  applyLook()
-              }
-
-              private fun pillBg(r: Int): Drawable {
-                  val focusColor = if (look.glassMode) 0x77FFFFFF else 0x66FFFFFF
-                  val normalColor = if (look.glassMode) 0x60202636.toInt() else 0x22FFFFFF
-                  return StateListDrawable().apply {
-                      addState(intArrayOf(android.R.attr.state_focused), GradientDrawable().apply { setColor(focusColor); cornerRadius = dp(r).toFloat() })
-                      addState(StateSet.WILD_CARD, GradientDrawable().apply { setColor(normalColor); cornerRadius = dp(r).toFloat() })
-                  }
-              }
-
-              private fun zoomOnFocus(v: View) {
-                  v.setOnFocusChangeListener { view, f -> 
-                      view.animate().scaleX(if (f) 1.08f else 1f).scaleY(if (f) 1.08f else 1f).setDuration(120).start() 
-                  }
-              }
-
-              // Logo-based toggle pill for Wi-Fi and Bluetooth
-              private fun logoPill(isWifi: Boolean, labelText: String, onLong: (() -> Unit)? = null, click: () -> Unit): View {
-                  val container = LinearLayout(this).apply {
-                      orientation = LinearLayout.HORIZONTAL
-                      gravity = Gravity.CENTER_VERTICAL
-                      setPadding(dp(12), dp(6), dp(14), dp(6))
-                      isFocusable = true
-                      background = pillBg(20)
-                  }
-                  zoomOnFocus(container)
-                  container.setOnClickListener { click() }
-                  if (onLong != null) container.setOnLongClickListener { onLong(); true }
-
-                  val iconView = ImageView(this).apply {
-                      layoutParams = LinearLayout.LayoutParams(dp(20), dp(20))
-                      setColorFilter(Color.WHITE)
-                      setImageResource(if (isWifi) android.R.drawable.ic_menu_upload else android.R.drawable.ic_menu_manage)
-                  }
-                  val tv = TextView(this).apply {
-                      text = labelText
-                      setTextColor(Color.WHITE)
-                      textSize = 13f
-                      setPadding(dp(8), 0, 0, 0)
-                  }
-                  if (isWifi) wifiStatusTv = tv else btStatusTv = tv
-                  container.addView(iconView)
-                  container.addView(tv)
-                  return container
-              }
-
-              private fun textPill(label: String, onLong: (() -> Unit)? = null, click: () -> Unit): TextView {
-                  val t = TextView(this).apply {
-                      text = label
-                      setTextColor(Color.WHITE)
-                      textSize = 13f
-                      gravity = Gravity.CENTER
-                      setPadding(dp(14), dp(8), dp(14), dp(8))
-                      isFocusable = true
-                      background = pillBg(20)
-                  }
-                  zoomOnFocus(t)
-                  t.setOnClickListener { click() }
-                  if (onLong != null) t.setOnLongClickListener { onLong(); true }
-                  return t
-              }
-
-              private fun buildTopBarAndClock() {
-                  val bar = LinearLayout(this).apply {
-                      orientation = LinearLayout.HORIZONTAL
-                      gravity = Gravity.CENTER_VERTICAL
-                      clipChildren = false
-                      setPadding(dp(64), dp(22), dp(64), 0)
-                  }
-                  
-                  // Left Side Profile Chip
-                  val chip = LinearLayout(this).apply {
-                      orientation = LinearLayout.HORIZONTAL
-                      gravity = Gravity.CENTER_VERTICAL
-                      setPadding(dp(8), dp(6), dp(16), dp(6))
-                      isFocusable = true
-                      background = pillBg(30)
-                  }
-                  zoomOnFocus(chip)
-                  chip.setOnClickListener { profileMenu() }
-                  chipAvatar = TextView(this).apply {
-                      gravity = Gravity.CENTER
-                      setTextColor(Color.WHITE)
-                      textSize = 16f
-                      typeface = Typeface.create("sans-serif-medium", Typeface.BOLD)
-                      background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(defaultTint) }
-                  }
-                  val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(10), 0, 0, 0) }
-                  chipName = TextView(this).apply { setTextColor(Color.WHITE); textSize = 14f; typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL) }
-                  chipMail = TextView(this).apply {
-                      setTextColor(0x99FFFFFF.toInt()); textSize = 11f; maxLines = 1
-                      ellipsize = TextUtils.TruncateAt.END; maxWidth = dp(140)
-                  }
-                  col.addView(chipName); col.addView(chipMail)
-                  chip.addView(chipAvatar, LinearLayout.LayoutParams(dp(36), dp(36)))
-                  chip.addView(col)
-                  bar.addView(chip)
-
-                  // Left-aligned Quick Settings Toggles (Wi-Fi, Bluetooth, Audio, Video, Customize)
-                  wifiPill = logoPill(true, "Wi-Fi") { toggleWifi() }
-                  btPill = logoPill(false, "Bluetooth") { toggleBt() }
-                  val audioPill = textPill("Audio", { pickSettingsPage("audio") }) { openShortcut("audio") }
-                  val videoPill = textPill("Video", { pickSettingsPage("video") }) { openShortcut("video") }
-                  val customPill = textPill("Customize") { customize() }
-
-                  val leftToggles = listOf(wifiPill, btPill, audioPill, videoPill, customPill)
-                  for (p in leftToggles) {
-                      bar.addView(p, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(10) })
-                  }
-
-                  // Spacer pushing Time and Date to the RIGHT corner
-                  bar.addView(View(this), LinearLayout.LayoutParams(0, 1, 1f))
-
-                  // Right-corner Time and Date Block
-                  val rightCornerLayout = LinearLayout(this).apply {
-                      orientation = LinearLayout.VERTICAL
-                      gravity = Gravity.END
-                  }
-                  clock = TextView(this).apply {
-                      setTextColor(Color.WHITE)
-                      textSize = 22f
-                      typeface = Typeface.create("sans-serif-light", Typeface.NORMAL)
-                      gravity = Gravity.END
-                  }
-                  date = TextView(this).apply {
-                      setTextColor(0x99FFFFFF.toInt())
-                      textSize = 12f
-                      gravity = Gravity.END
-                  }
-                  rightCornerLayout.addView(clock)
-                  rightCornerLayout.addView(date)
-                  bar.addView(rightCornerLayout)
-
-                  content.addView(bar, FrameLayout.LayoutParams(-1, -2, Gravity.TOP))
-              }
-
-              private fun buildHeroAndStats() {
-                  val hero = LinearLayout(this).apply {
-                      orientation = LinearLayout.VERTICAL
-                      setPadding(dp(64), dp(84), 0, 0)
-                  }
-                  greeting = TextView(this).apply { setTextColor(Color.WHITE); textSize = 16f; typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL) }
-                  hero.addView(greeting)
-                  heroBox = hero
-                  content.addView(hero, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.START))
-
-                  // CPU, RAM, GPU System Stats Tile
-                  cpuTv = statTv(); ramTv = statTv(); gpuTv = statTv()
-                  cpuBar = statBar(0xFF60A5FA.toInt()); ramBar = statBar(0xFFA78BFA.toInt()); gpuBar = statBar(0xFF34D399.toInt())
-                  statsBox = LinearLayout(this).apply {
-                      orientation = LinearLayout.HORIZONTAL
-                      setPadding(dp(12), dp(8), dp(12), dp(8))
-                      background = GradientDrawable().apply { 
-                          setColor(if (look.glassMode) 0x50111111.toInt() else 0x26FFFFFF)
-                          cornerRadius = dp(12).toFloat
+      - name: Build
+        run: gradle assembleDebug --no-daemon
+      - name: Rename APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk CineLauncher.apk
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: Cine Launcher v${{ github.run_number }}
+          files: CineLauncher.apk
