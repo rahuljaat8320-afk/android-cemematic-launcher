@@ -20,6 +20,7 @@ jobs:
       - name: Write project files
         run: |
           mkdir -p app
+          mkdir -p app
           cat > app/build.gradle.kts <<'CINE_EOF'
           plugins {
               id("com.android.application")
@@ -76,6 +77,14 @@ jobs:
                       <action android:name="android.intent.action.MAIN" />
                       <category android:name="android.intent.category.LAUNCHER" />
                   </intent>
+                  <intent>
+                      <action android:name="android.intent.action.MAIN" />
+                      <category android:name="android.intent.category.HOME" />
+                  </intent>
+                  <intent><action android:name="org.adw.launcher.THEMES" /></intent>
+                  <intent><action android:name="com.novalauncher.THEME" /></intent>
+                  <intent><action android:name="com.anddoes.launcher.THEME" /></intent>
+                  <intent><action android:name="com.gau.go.launcherex.theme" /></intent>
                   <intent><action android:name="android.settings.BLUETOOTH_SETTINGS" /></intent>
                   <intent><action android:name="android.settings.WIFI_SETTINGS" /></intent>
                   <intent><action android:name="android.settings.SOUND_SETTINGS" /></intent>
@@ -97,21 +106,21 @@ jobs:
                       android:name=".MainActivity"
                       android:exported="true"
                       android:launchMode="singleTask"
+                      android:clearTaskOnLaunch="true"
+                      android:windowSoftInputMode="adjustPan"
                       android:stateNotNeeded="true"
                       android:resumeWhilePausing="true"
                       android:screenOrientation="landscape">
-                      <intent-filter>
+                      <!-- Home / launcher role: this is what makes the TV list it as a home screen. -->
+                      <intent-filter android:priority="1">
                           <action android:name="android.intent.action.MAIN" />
-                          <category android:name="android.intent.category.LAUNCHER" />
-                      </intent-filter>
-                      <intent-filter>
-                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.HOME" />
+                          <category android:name="android.intent.category.DEFAULT" />
                           <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
                       </intent-filter>
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
-                          <category android:name="android.intent.category.HOME" />
-                          <category android:name="android.intent.category.DEFAULT" />
+                          <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
                   </activity>
               </application>
@@ -253,7 +262,7 @@ jobs:
 
               class VH(
                   val root: LinearLayout, val card: FrameLayout, val img: ImageView,
-                  val sheen: View, val ring: View, val label: TextView
+                  val sheen: View, val ring: View, val label: TextView, val inLabel: TextView
               ) : RecyclerView.ViewHolder(root) {
                   var cur: AppItem? = null
               }
@@ -266,7 +275,7 @@ jobs:
                       override fun getOldListSize() = o.size
                       override fun getNewListSize() = n.size
                       override fun areItemsTheSame(a: Int, b: Int) = o[a].pkg == n[b].pkg
-                      override fun areContentsTheSame(a: Int, b: Int) = o[a].label == n[b].label && o[a].isBanner == n[b].isBanner
+                      override fun areContentsTheSame(a: Int, b: Int) = o[a].label == n[b].label && o[a].isBanner == n[b].isBanner && o[a].icon === n[b].icon
                   })
                   items = n
                   res.dispatchUpdatesTo(this)
@@ -293,10 +302,11 @@ jobs:
                           val r = if (circle) minOf(v.width, v.height) / 2f else radius
                           o.setRoundRect(0, 0, v.width, v.height, r)
                           // A see-through tile gets a faint shadow, a solid one a normal shadow.
-                          o.alpha = look.fillA.coerceIn(0f, 1f)
+                          o.alpha = (if (look.style == 4 && !look.blur) maxOf(look.fillA, 0.55f) else look.fillA).coerceIn(0f, 1f)
                       }
                   }
                   card.clipToOutline = true
+                  card.cameraDistance = 9000f * d
                   card.isFocusable = true
                   card.isFocusableInTouchMode = false
 
@@ -318,7 +328,19 @@ jobs:
                       }
                       alpha = 0f
                   }
-                  card.addView(img); card.addView(sheen); card.addView(ring)
+                  // Name inside the tile (used by blur mode, where the highlight wraps both logo and name).
+                  val inLabel = TextView(c).apply {
+                      layoutParams = FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM).apply { bottomMargin = dp(8) }
+                      gravity = Gravity.CENTER
+                      setTextColor(0xFFEDE8DF.toInt())
+                      textSize = 15f
+                      typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                      maxLines = 1
+                      ellipsize = TextUtils.TruncateAt.END
+                      setPadding(dp(6), 0, dp(6), 0)
+                      visibility = View.GONE
+                  }
+                  card.addView(img); card.addView(inLabel); card.addView(sheen); card.addView(ring)
 
                   val label = TextView(c).apply {
                       layoutParams = LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) }
@@ -331,7 +353,7 @@ jobs:
                       ellipsize = TextUtils.TruncateAt.END
                   }
                   root.addView(card); root.addView(label)
-                  return VH(root, card, img, sheen, ring, label)
+                  return VH(root, card, img, sheen, ring, label, inLabel)
               }
 
               override fun onBindViewHolder(h: VH, position: Int) {
@@ -347,7 +369,17 @@ jobs:
                   } else {
                       val banner = item.isBanner && !look.useIcon
                       h.img.setImageDrawable(if (look.useIcon) item.icon else item.image)
-                      if (banner) {
+                      val ilp = h.img.layoutParams as FrameLayout.LayoutParams
+                      ilp.topMargin = if (look.blur) (8 * d).toInt() else 0
+                      ilp.bottomMargin = if (look.blur) (30 * d).toInt() else 0
+                      h.img.layoutParams = ilp
+                      if (look.blur) {
+                          val px = (cw * 0.2f * d).toInt()
+                          val py = (ch * 0.04f * d).toInt()
+                          h.img.scaleType = ImageView.ScaleType.FIT_CENTER
+                          h.img.setPadding(px, py, px, py)
+                          h.img.alpha = 1f
+                      } else if (banner) {
                           h.img.scaleType = ImageView.ScaleType.CENTER_CROP
                           h.img.setPadding(0, 0, 0, 0)
                           h.img.alpha = look.imgAlpha
@@ -359,9 +391,12 @@ jobs:
                       }
                   }
                   h.label.text = item.label
-                  h.label.visibility = if (look.labels == 2) View.GONE else View.VISIBLE
+                  h.inLabel.text = item.label
+                  h.inLabel.visibility = if (look.blur) View.VISIBLE else View.GONE
+                  h.label.visibility = if (look.blur || look.labels == 2) View.GONE else View.VISIBLE
                   h.card.animate().cancel()
                   h.card.scaleX = 1f; h.card.scaleY = 1f; h.card.translationZ = 0f; h.card.translationY = 0f
+                  h.card.rotationX = 0f; h.card.rotationY = 0f
                   h.sheen.alpha = 0f
                   h.ring.alpha = 0f
                   h.label.alpha = if (look.labels == 1) 1f else 0f
@@ -370,10 +405,23 @@ jobs:
                       val mv = moving != null && moving == h.cur?.pkg
                       val s = if (focused) look.scale + (if (mv) 0.08f else 0f) else 1f
                       val dur = if (look.anim && look.style != 3) look.dur else 0L
-                      val lift = if (focused && (look.style == 2 || mv)) -8f * d else 0f
+                      val three = look.style == 4
+                      val lift = if (focused && (look.style == 2 || three || mv)) -8f * d else 0f
                       val interp: TimeInterpolator = if (look.style == 1) OvershootInterpolator(2.2f) else EASE
+                      // 3D pop: the chosen tile lifts towards you, tilts back a little and turns slightly towards the screen centre.
+                      var rx = 0f
+                      var ry = 0f
+                      if (three && focused) {
+                          val loc = IntArray(2)
+                          v.getLocationOnScreen(loc)
+                          val sw = v.resources.displayMetrics.widthPixels.coerceAtLeast(1)
+                          val frac = ((loc[0] + v.width / 2f) - sw / 2f) / (sw / 2f)
+                          rx = 9f
+                          ry = (frac * 12f).coerceIn(-12f, 12f)
+                      }
                       v.animate().scaleX(s).scaleY(s).translationY(lift)
-                          .translationZ(if (focused) 16 * d else 0f)
+                          .rotationX(rx).rotationY(ry)
+                          .translationZ(if (focused) (if (three) 30 else 16) * d else 0f)
                           .setInterpolator(interp)
                           .setDuration(dur).start()
                       if (look.sheen) h.sheen.animate().alpha(if (focused) 1f else 0f).setDuration(dur).start()
@@ -456,6 +504,289 @@ jobs:
               /** Jump (no animation) so the tile at [pos] sits in the middle; the manager clamps this at both ends. */
               fun jumpCentered(rv: RecyclerView, pos: Int, itemPx: Int) {
                   scrollToPositionWithOffset(pos, (rv.width - itemPx) / 2)
+              }
+          }
+          CINE_EOF
+          mkdir -p app/src/main/java/com/cine/launcher
+          cat > app/src/main/java/com/cine/launcher/Blur.kt <<'CINE_EOF'
+          package com.cine.launcher
+
+          import android.content.Context
+          import android.graphics.Bitmap
+          import android.graphics.Canvas
+          import android.graphics.Paint
+          import android.graphics.Path
+          import android.graphics.Rect
+          import android.graphics.RectF
+          import android.widget.LinearLayout
+
+          /**
+           * Frosted-glass bar. Draws a blurred copy of the wallpaper that sits exactly behind the bar,
+           * then a dark translucent tint and a thin light edge. Works on every Android version
+           * because the blur is done on the (small) wallpaper bitmap, not on the live screen.
+           */
+          class BlurPanel(ctx: Context) : LinearLayout(ctx) {
+              var blurOn = false
+                  set(v) { field = v; invalidate() }
+              var blurBmp: Bitmap? = null
+                  set(v) { field = v; invalidate() }
+              var radiusPx = 0f
+              private val bmpP = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+              private val fillP = Paint(Paint.ANTI_ALIAS_FLAG)
+              private val lineP = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeWidth = 2f; color = 0x33FFFFFF }
+              private val path = Path()
+              private val src = Rect()
+              private val dst = RectF()
+
+              init { setWillNotDraw(false) }
+
+              override fun onDraw(c: Canvas) {
+                  super.onDraw(c)
+                  if (!blurOn) return
+                  val w = width.toFloat()
+                  val h = height.toFloat()
+                  if (w <= 0f || h <= 0f) return
+                  dst.set(0f, 0f, w, h)
+                  path.reset()
+                  path.addRoundRect(dst, radiusPx, radiusPx, Path.Direction.CW)
+                  c.save()
+                  c.clipPath(path)
+                  val b = blurBmp
+                  if (b != null) {
+                      val loc = IntArray(2)
+                      getLocationInWindow(loc)
+                      val rw = rootView.width.coerceAtLeast(1)
+                      val rh = rootView.height.coerceAtLeast(1)
+                      val sx = b.width.toFloat() / rw
+                      val sy = b.height.toFloat() / rh
+                      val l = (loc[0] * sx).toInt().coerceIn(0, b.width - 1)
+                      val t = (loc[1] * sy).toInt().coerceIn(0, b.height - 1)
+                      val r = ((loc[0] + w) * sx).toInt().coerceIn(l + 1, b.width)
+                      val bt = ((loc[1] + h) * sy).toInt().coerceIn(t + 1, b.height)
+                      src.set(l, t, r, bt)
+                      c.drawBitmap(b, src, dst, bmpP)
+                      fillP.color = 0x8C121A1E.toInt()
+                  } else {
+                      fillP.color = 0xCC141C20.toInt()
+                  }
+                  c.drawRect(dst, fillP)
+                  c.restore()
+                  c.drawPath(path, lineP)
+              }
+          }
+
+          object Blur {
+              /** Returns a small, heavily blurred copy of [src] (screen aligned). [radius] is in pixels of the small copy. */
+              fun blurred(src: Bitmap, radius: Int): Bitmap {
+                  val w = maxOf(32, src.width / 8)
+                  val h = maxOf(18, src.height / 8)
+                  val small = Bitmap.createScaledBitmap(src, w, h, true).copy(Bitmap.Config.ARGB_8888, true)!!
+                  var a = IntArray(w * h)
+                  var b = IntArray(w * h)
+                  small.getPixels(a, 0, w, 0, 0, w, h)
+                  for (i in 0 until 3) {
+                      pass(a, b, w, h, radius, true)
+                      pass(b, a, w, h, radius, false)
+                  }
+                  small.setPixels(a, 0, w, 0, 0, w, h)
+                  return small
+              }
+
+              private fun pass(s: IntArray, d: IntArray, w: Int, h: Int, r: Int, horiz: Boolean) {
+                  val len = if (horiz) w else h
+                  val lines = if (horiz) h else w
+                  val win = 2 * r + 1
+                  for (l in 0 until lines) {
+                      var sr = 0
+                      var sg = 0
+                      var sb = 0
+                      for (k in -r..r) {
+                          val p = s[at(l, k.coerceIn(0, len - 1), w, horiz)]
+                          sr += (p shr 16) and 255; sg += (p shr 8) and 255; sb += p and 255
+                      }
+                      for (i in 0 until len) {
+                          d[at(l, i, w, horiz)] = (0xFF shl 24) or ((sr / win) shl 16) or ((sg / win) shl 8) or (sb / win)
+                          val add = s[at(l, minOf(i + r + 1, len - 1), w, horiz)]
+                          val sub = s[at(l, maxOf(i - r, 0), w, horiz)]
+                          sr += ((add shr 16) and 255) - ((sub shr 16) and 255)
+                          sg += ((add shr 8) and 255) - ((sub shr 8) and 255)
+                          sb += (add and 255) - (sub and 255)
+                      }
+                  }
+              }
+
+              private fun at(line: Int, i: Int, w: Int, horiz: Boolean): Int = if (horiz) line * w + i else i * w + line
+          }
+          CINE_EOF
+          mkdir -p app/src/main/java/com/cine/launcher
+          cat > app/src/main/java/com/cine/launcher/Icons.kt <<'CINE_EOF'
+          package com.cine.launcher
+
+          import android.content.ComponentName
+          import android.content.Context
+          import android.content.pm.PackageManager
+          import android.content.res.Resources
+          import android.graphics.Bitmap
+          import android.graphics.Canvas
+          import android.graphics.Paint
+          import android.graphics.PorterDuff
+          import android.graphics.PorterDuffColorFilter
+          import android.graphics.RectF
+          import android.graphics.drawable.AdaptiveIconDrawable
+          import android.graphics.drawable.BitmapDrawable
+          import android.graphics.drawable.Drawable
+          import android.os.Build
+          import android.util.Xml
+          import org.xmlpull.v1.XmlPullParser
+
+          /** Reads a normal Android icon-pack app (ADW / Nova / Apex / Go style: it ships an appfilter.xml). */
+          class IconPack(private val pm: PackageManager, val pkg: String) {
+              private val map = HashMap<String, String>()
+              private var res: Resources? = null
+
+              fun load(): Boolean {
+                  try {
+                      val r = pm.getResourcesForApplication(pkg)
+                      res = r
+                      var parser: XmlPullParser? = null
+                      val id = r.getIdentifier("appfilter", "xml", pkg)
+                      if (id != 0) parser = r.getXml(id)
+                      else {
+                          try {
+                              val p = Xml.newPullParser()
+                              p.setInput(r.assets.open("appfilter.xml"), "utf-8")
+                              parser = p
+                          } catch (e: Exception) { }
+                      }
+                      if (parser == null) return false
+                      var ev = parser.eventType
+                      while (ev != XmlPullParser.END_DOCUMENT) {
+                          if (ev == XmlPullParser.START_TAG && parser.name == "item") {
+                              val comp = parser.getAttributeValue(null, "component")
+                              val dr = parser.getAttributeValue(null, "drawable")
+                              if (comp != null && dr != null && comp.contains("{") && comp.contains("/")) {
+                                  val key = comp.substringAfter("{").substringBefore("}")
+                                  if (!map.containsKey(key)) map[key] = dr
+                              }
+                          }
+                          ev = parser.next()
+                      }
+                  } catch (e: Exception) { return false }
+                  return map.isNotEmpty()
+              }
+
+              fun get(cn: ComponentName): Drawable? {
+                  val r = res ?: return null
+                  val name = map[cn.packageName + "/" + cn.className] ?: return null
+                  return try {
+                      var id = r.getIdentifier(name, "drawable", pkg)
+                      if (id == 0) id = r.getIdentifier(name, "mipmap", pkg)
+                      if (id == 0) null else r.getDrawable(id, null)
+                  } catch (e: Exception) { null }
+              }
+          }
+
+          object Icons {
+              val CREAM: Int = 0xFFEDE8DF.toInt()
+
+              private fun toBitmap(d: Drawable, size: Int): Bitmap {
+                  val b = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+                  d.setBounds(0, 0, size, size)
+                  d.draw(Canvas(b))
+                  return b
+              }
+
+              // An adaptive icon is a 108x108 canvas of which the centre 72x72 is shown: draw it big and keep the centre.
+              private fun cropCentre(draw: (Canvas, Int) -> Unit, size: Int): Bitmap {
+                  val big = size * 3 / 2
+                  val b = Bitmap.createBitmap(big, big, Bitmap.Config.ARGB_8888)
+                  draw(Canvas(b), big)
+                  val o = (big - size) / 2
+                  return Bitmap.createBitmap(b, o, o, size, size)
+              }
+
+              private fun tint(b: Bitmap): Bitmap {
+                  val o = Bitmap.createBitmap(b.width, b.height, Bitmap.Config.ARGB_8888)
+                  val p = Paint(Paint.FILTER_BITMAP_FLAG)
+                  p.colorFilter = PorterDuffColorFilter(CREAM, PorterDuff.Mode.SRC_IN)
+                  Canvas(o).drawBitmap(b, 0f, 0f, p)
+                  return o
+              }
+
+              /**
+               * Turns any app icon into a single-colour (cream) logo, like the glass-bar reference.
+               * 1. Android 13 "themed icon" layer when the app has one.
+               * 2. Otherwise the icon's background colour is removed and only the logo shape is kept.
+               */
+              fun mono(ctx: Context, src: Drawable, size: Int = 160): Drawable {
+                  try {
+                      if (Build.VERSION.SDK_INT >= 33 && src is AdaptiveIconDrawable) {
+                          val m = src.monochrome
+                          if (m != null) {
+                              val bmp = cropCentre({ c, s -> m.setBounds(0, 0, s, s); m.draw(c) }, size)
+                              return BitmapDrawable(ctx.resources, tint(bmp))
+                          }
+                      }
+                      val bmp: Bitmap = if (Build.VERSION.SDK_INT >= 26 && src is AdaptiveIconDrawable) {
+                          cropCentre({ c, s ->
+                              src.background?.let { it.setBounds(0, 0, s, s); it.draw(c) }
+                              src.foreground?.let { it.setBounds(0, 0, s, s); it.draw(c) }
+                          }, size)
+                      } else toBitmap(src, size)
+                      return BitmapDrawable(ctx.resources, cutout(bmp))
+                  } catch (e: Exception) { return src }
+              }
+
+              private fun cutout(b: Bitmap): Bitmap {
+                  val w = b.width
+                  val h = b.height
+                  val px = IntArray(w * h)
+                  b.getPixels(px, 0, w, 0, 0, w, h)
+                  // sample the background near the four corners (a bit inside, so rounded icon corners don't fool us)
+                  val ins = (w * 0.1f).toInt().coerceAtLeast(1)
+                  val pts = intArrayOf(ins, ins, w - 1 - ins, ins, ins, h - 1 - ins, w - 1 - ins, h - 1 - ins)
+                  var ar = 0; var ag = 0; var ab = 0; var aa = 0
+                  for (k in 0 until 4) {
+                      val p = px[pts[k * 2 + 1] * w + pts[k * 2]]
+                      aa += (p ushr 24) and 255; ar += (p shr 16) and 255; ag += (p shr 8) and 255; ab += p and 255
+                  }
+                  aa /= 4; ar /= 4; ag /= 4; ab /= 4
+                  val solidBg = aa > 200
+                  val rgb = CREAM and 0x00FFFFFF
+                  for (i in px.indices) {
+                      val p = px[i]
+                      val pa = (p ushr 24) and 255
+                      val a: Int
+                      if (!solidBg) a = pa
+                      else {
+                          val dr = Math.abs(((p shr 16) and 255) - ar)
+                          val dg = Math.abs(((p shr 8) and 255) - ag)
+                          val db = Math.abs((p and 255) - ab)
+                          val dist = maxOf(dr, maxOf(dg, db))
+                          a = (((dist - 40) * 255 / 100).coerceIn(0, 255)) * pa / 255
+                      }
+                      px[i] = (a shl 24) or rgb
+                  }
+                  val o = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                  o.setPixels(px, 0, w, 0, 0, w, h)
+                  return o
+              }
+
+              /** shape 0 = round badge, 1 = squircle badge */
+              fun badge(ctx: Context, src: Drawable, shape: Int): Drawable {
+                  try {
+                      val s = 160
+                      val b = Bitmap.createBitmap(s, s, Bitmap.Config.ARGB_8888)
+                      val c = Canvas(b)
+                      val p = Paint(Paint.ANTI_ALIAS_FLAG)
+                      p.color = 0xFF232B3D.toInt()
+                      if (shape == 0) c.drawCircle(s / 2f, s / 2f, s / 2f, p)
+                      else c.drawRoundRect(RectF(0f, 0f, s.toFloat(), s.toFloat()), s * 0.28f, s * 0.28f, p)
+                      val ic = toBitmap(src, s)
+                      val inset = s * 0.18f
+                      c.drawBitmap(ic, null, RectF(inset, inset, s - inset, s - inset), Paint(Paint.FILTER_BITMAP_FLAG))
+                      return BitmapDrawable(ctx.resources, b)
+                  } catch (e: Exception) { return src }
               }
           }
           CINE_EOF
@@ -567,6 +898,10 @@ jobs:
               private lateinit var tvSetBtn: ImageView
               private lateinit var titleApps: TextView
               private lateinit var setBtn: ImageView
+              private lateinit var bottomBox: BlurPanel
+              private var iconKey = ""
+              private var blurSrcKey = ""
+              private var blurCache: Bitmap? = null
               private lateinit var rowR: RecyclerView
               private lateinit var row1: RecyclerView
               private lateinit var row2: RecyclerView
@@ -607,7 +942,6 @@ jobs:
               private val avatarColors = intArrayOf(0xFF3B4CCA.toInt(), 0xFF0F9D7A.toInt(), 0xFFD9480F.toInt(), 0xFF9C36B5.toInt(), 0xFFC2255C.toInt())
               private var moving: String? = null
               private var pendingFocus: String? = null
-              private val addItem = AppItem("Add apps", ADD_PKG, Intent(), ColorDrawable(0), ColorDrawable(0), false, true)
               private var master: List<AppItem> = emptyList()
               private var shown: List<AppItem> = emptyList()
               private var splitFirst: AppItem? = null
@@ -639,6 +973,7 @@ jobs:
                   buildRows()
                   setContentView(root)
                   applyLook()
+                  handler.postDelayed({ askDefaultOnce() }, 1500)
               }
 
               // ---------- UI building ----------
@@ -727,23 +1062,28 @@ jobs:
                   if (store.sel("bset") == 0) show.add(tvSetBtn)
                   if (store.sel("bmore") == 0) show.add(moreBtn)
                   show.add(setBtn)
+                  for (v in listOf<View>(profBtn, wifiBtn, btBtn, audBtn, vidBtn, inputBtn, tvSetBtn, moreBtn, setBtn)) (v.parent as? ViewGroup)?.removeView(v)
                   btnBar.removeAllViews()
-                  for (v in show) {
-                      val bg = if (v === profBtn) TileBg(-1f, avatarCol, 1f, false, dp(1).toFloat())
-                      else TileBg(rad, col, a, look.edge, dp(1).toFloat())
-                      bg.ringColor = look.ringColor
-                      v.background = bg
-                      if (v is ImageView) v.setPadding(pad, pad, pad, pad)
-                      btnBar.addView(v, LinearLayout.LayoutParams(sz, sz).apply { marginEnd = gap })
+                  if (!look.blur) {
+                      for (v in show) {
+                          val bg = if (v === profBtn) TileBg(-1f, avatarCol, 1f, false, dp(1).toFloat())
+                          else TileBg(rad, col, a, look.edge, dp(1).toFloat())
+                          bg.ringColor = look.ringColor
+                          v.background = bg
+                          v.isFocusable = true
+                          if (v is ImageView) v.setPadding(pad, pad, pad, pad)
+                          btnBar.addView(v, LinearLayout.LayoutParams(sz, sz).apply { marginEnd = gap })
+                      }
                   }
                   profBtn.textSize = szN * 0.4f
-                  val bp = store.sel("bpos")
+                  if (look.blur) blurTop(show)
+                  val bp = if (look.blur) 2 else store.sel("bpos")
                   val g = when (bp) { 0 -> Gravity.START; 1 -> Gravity.CENTER_HORIZONTAL; else -> Gravity.END }
                   btnBar.layoutParams = FrameLayout.LayoutParams(-2, -2, Gravity.TOP or g).apply {
                       topMargin = dp(18); marginStart = dp(48); marginEnd = dp(48)
                   }
 
-                  val cp = store.sel("cpos")
+                  val cp = if (look.blur && store.sel("cpos") != 3) 1 else store.sel("cpos")
                   clockBox.visibility = if (cp == 3) View.GONE else View.VISIBLE
                   clock.textSize = store.n("csize").toFloat()
                   date.visibility = if (store.sel("cdate") == 0) View.VISIBLE else View.GONE
@@ -754,6 +1094,54 @@ jobs:
                   clockBox.layoutParams = FrameLayout.LayoutParams(-2, -2, Gravity.TOP or cg).apply {
                       topMargin = dp(14) + (if (same) sz + dp(8) else 0)
                       marginStart = dp(48); marginEnd = dp(48)
+                  }
+              }
+
+              /** Blur mode: small logo + name for every top button, separated by a "|". */
+              private fun blurTop(show: List<View>) {
+                  val names = HashMap<View, String>()
+                  names[profBtn] = store.profile().getString("name")
+                  names[wifiBtn] = "Wi-Fi"; names[btBtn] = "Bluetooth"; names[audBtn] = "Audio"; names[vidBtn] = "Video"
+                  names[inputBtn] = "Input"; names[tvSetBtn] = "Settings"; names[moreBtn] = "More"; names[setBtn] = "Customize"
+                  val ic = dp(22)
+                  var first = true
+                  for (v in show) {
+                      if (!first) {
+                          btnBar.addView(TextView(this).apply {
+                              text = "|"; setTextColor(0x66FFFFFF); textSize = 20f
+                              setPadding(dp(2), 0, dp(2), 0)
+                          })
+                      }
+                      first = false
+                      val chip = LinearLayout(this).apply {
+                          orientation = LinearLayout.HORIZONTAL
+                          gravity = Gravity.CENTER_VERTICAL
+                          setPadding(dp(14), dp(8), dp(14), dp(8))
+                          isFocusable = true
+                          background = TileBg(dp(14).toFloat(), Color.WHITE, 0f, false, dp(1).toFloat()).also { it.ringColor = look.ringColor }
+                      }
+                      v.isFocusable = false
+                      if (v === profBtn) {
+                          v.background = TileBg(-1f, avatarCol, 1f, false, dp(1).toFloat())
+                          profBtn.textSize = 11f
+                      } else {
+                          v.background = null
+                          if (v is ImageView) v.setPadding(0, 0, 0, 0)
+                      }
+                      chip.addView(v, LinearLayout.LayoutParams(ic, ic))
+                      chip.addView(TextView(this).apply {
+                          text = names[v] ?: ""
+                          setTextColor(Icons.CREAM); textSize = 17f; maxLines = 1
+                          typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                          setShadowLayer(6f, 0f, 1f, 0x66000000)
+                      }, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(8) })
+                      chip.setOnClickListener { v.performClick() }
+                      chip.setOnLongClickListener { v.performLongClick() }
+                      chip.setOnFocusChangeListener { c, f ->
+                          val d = if (look.anim && look.style != 3) look.dur else 0L
+                          (c.background as? TileBg)?.animateFocus(f, d, EASE)
+                      }
+                      btnBar.addView(chip, LinearLayout.LayoutParams(-2, -2))
                   }
               }
 
@@ -841,6 +1229,7 @@ jobs:
                       changeDuration = 0
                   }
                   titleApps = TextView(this).apply {
+                      visibility = View.GONE
                       text = "Your apps"
                       setTextColor(Color.WHITE)
                       textSize = 20f
@@ -848,11 +1237,12 @@ jobs:
                       setShadowLayer(8f, 0f, 2f, 0x99000000.toInt())
                       setPadding(dp(52), dp(4), dp(48), 0)
                   }
-                  val bottom = LinearLayout(this).apply {
+                  bottomBox = BlurPanel(this).apply {
                       orientation = LinearLayout.VERTICAL
                       clipChildren = false
                       setPadding(0, 0, 0, dp(8))
                   }
+                  val bottom = bottomBox
                   bottom.addView(rowR, LinearLayout.LayoutParams(-1, -2))
                   bottom.addView(titleApps, LinearLayout.LayoutParams(-1, -2))
                   bottom.addView(row1, LinearLayout.LayoutParams(-1, -2))
@@ -871,12 +1261,13 @@ jobs:
 
               private fun applyLook() {
                   look.anim = store.sel("anim") == 0
+                  look.blur = store.sel("blur") == 1
                   prepareBackground()
                   baseBg.color = if (store.sel("bg") == 1) Color.BLACK else 0xFF05060B.toInt()
 
-                  look.radius = store.n("corner")
-                  look.circle = store.sel("tshape") == 1
-                  look.scale = store.n("focus") / 100f
+                  look.radius = if (look.blur) 16 else store.n("corner")
+                  look.circle = store.sel("tshape") == 1 && !look.blur
+                  look.scale = minOf(store.n("focus") / 100f, if (look.blur) 1.08f else 2f)
                   look.sheen = store.sel("sheen") == 0
                   look.labels = store.sel("labels")
                   look.dur = longArrayOf(0, 100, 160, 260, 420)[store.sel("fdur")]
@@ -884,10 +1275,10 @@ jobs:
                   look.gap = store.n("gap")
                   look.ring = store.sel("ring")
                   look.ringColor = if (look.ring == 2) themeAccent() else Color.WHITE
-                  look.useIcon = store.sel("art") == 1
-                  look.fillColor = tileColorOf(store.sel("tcolor"))
-                  look.fillA = store.n("topac") / 100f
-                  look.edge = store.sel("tedge") == 0
+                  look.useIcon = store.sel("art") == 1 || look.blur || store.get("iconpack", "").isNotEmpty()
+                  look.fillColor = if (look.blur) Color.WHITE else tileColorOf(store.sel("tcolor"))
+                  look.fillA = if (look.blur) 0f else store.n("topac") / 100f
+                  look.edge = store.sel("tedge") == 0 && !look.blur
                   look.imgAlpha = store.n("bnr") / 100f
                   look.centered = store.sel("scrmode") == 0
                   look.scrollMs = longArrayOf(0, 160, 240, 360)[store.sel("sscr")]
@@ -898,6 +1289,19 @@ jobs:
                   aR.cw = small; aR.ch = (small * ratio).toInt()
                   a1.cw = tw; a1.ch = (tw * ratio).toInt()
                   a2.cw = small; a2.ch = (small * ratio).toInt()
+                  if (look.blur) { val bw = tw * 7 / 10; a1.cw = bw; a1.ch = bw * 72 / 100 }
+                  for (r in listOf(rowR, row1, row2)) {
+                      r.clipChildren = look.blur
+                      if (look.blur) r.setPadding(dp(28), dp(16), dp(28), dp(16)) else r.setPadding(dp(48), dp(14), dp(48), dp(14))
+                  }
+                  bottomBox.blurOn = look.blur
+                  bottomBox.radiusPx = dp(28).toFloat()
+                  bottomBox.setPadding(0, 0, 0, if (look.blur) 0 else dp(8))
+                  val blp = bottomBox.layoutParams as FrameLayout.LayoutParams
+                  val bm = if (look.blur) dp(48) else 0
+                  blp.setMargins(bm, 0, bm, if (look.blur) dp(40) else 0)
+                  bottomBox.layoutParams = blp
+                  updateBlurBmp()
                   for ((r, a) in listOf(rowR to aR, row1 to a1, row2 to a2)) { r.adapter = null; r.adapter = a }
 
                   refreshProfile()
@@ -906,6 +1310,17 @@ jobs:
                   updateTime()
                   refreshToggles()
                   render()
+                  val ik = store.get("iconpack", "") + "|" + store.sel("blur") + "|" + store.sel("bmono")
+                  if (ik != iconKey) { iconKey = ik; loadApps() }
+              }
+
+              private fun updateBlurBmp() {
+                  val base = wallBase
+                  if (!look.blur || base == null) { bottomBox.blurBmp = null; return }
+                  val rad = intArrayOf(3, 6, 10)[store.sel("bstr")]
+                  val key = wallKey + "|" + rad
+                  if (key != blurSrcKey || blurCache == null) { blurCache = Blur.blurred(base, rad); blurSrcKey = key }
+                  bottomBox.blurBmp = blurCache
               }
 
               private fun prepareBackground() {
@@ -1056,21 +1471,20 @@ jobs:
                   val vis = master.filter { it.pkg !in hidden }
                   var list = s(vis.filter { it.pkg.isNotEmpty() && isLean(it) }) + s(vis.filter { !isLean(it) })
                   val ord = store.list("order")
-                  if (ord.isNotEmpty()) list = list.sortedBy { val i = ord.indexOf(it.pkg); if (i < 0) Int.MAX_VALUE else i }
+                  list = list.sortedBy { if (it.pkg == STORE_PKG) 0 else 1 }
+                  if (ord.isNotEmpty()) list = list.sortedBy { val i = ord.indexOf(it.pkg); if (i < 0) (if (it.pkg == STORE_PKG) -1 else Int.MAX_VALUE) else i }
                   shown = list
                   val n = intArrayOf(4, 6, 8, 10, 12)[store.sel("count")]
-                  val plus = if (store.sel("addtile") == 0) listOf(addItem) else emptyList()
-                  when (store.sel("layout")) {
+                  when (if (look.blur) 2 else store.sel("layout")) {
                       0 -> {
                           aR.setList(if (store.sel("toprow") == 0) store.list("recent").mapNotNull { p -> list.firstOrNull { it.pkg == p } } else emptyList())
-                          a1.setList(plus + list); a2.setList(emptyList())
+                          a1.setList(list); a2.setList(emptyList())
                       }
-                      1 -> { aR.setList(emptyList()); a1.setList(plus + list.take(n)); a2.setList(list.drop(n)) }
-                      else -> { aR.setList(emptyList()); a1.setList(plus + list); a2.setList(emptyList()) }
+                      1 -> { aR.setList(emptyList()); a1.setList(list.take(n)); a2.setList(list.drop(n)) }
+                      else -> { aR.setList(emptyList()); a1.setList(list); a2.setList(emptyList()) }
                   }
                   rowR.visibility = if (aR.items.isEmpty()) View.GONE else View.VISIBLE
                   row2.visibility = if (a2.items.isEmpty()) View.GONE else View.VISIBLE
-                  titleApps.visibility = if (a1.items.isEmpty()) View.GONE else View.VISIBLE
                   if (overlay == null) row1.post {
                       if (moving == null && (focusPending || currentFocus == null)) { if (focusFirstApp()) focusPending = false }
                   }
@@ -1078,7 +1492,7 @@ jobs:
 
               /** Puts the cursor on the first real app (the [+] tile sits just to its left). */
               private fun focusFirstApp(): Boolean {
-                  val pos = if (a1.items.size > 1) 1 else 0
+                  val pos = 0
                   val vh = row1.findViewHolderForAdapterPosition(pos) as? AppAdapter.VH
                   if (vh != null) return vh.card.requestFocus()
                   return row1.getChildAt(0)?.requestFocus() == true
@@ -1106,19 +1520,30 @@ jobs:
               private fun isLean(a: AppItem) = a.pkg in leanPkgs
 
               private fun loadApps() {
+                  val pack = store.get("iconpack", "")
+                  val monoBlur = store.sel("blur") == 1 && store.sel("bmono") == 0
                   io.execute {
                       val pm = packageManager
+                      val ip: IconPack? = if (pack.isNotEmpty() && !pack.startsWith("@")) IconPack(pm, pack).takeIf { it.load() } else null
                       val seen = HashSet<String>()
                       val result = ArrayList<AppItem>()
                       val lean = HashSet<String>()
                       fun add(cat: String, isLeanCat: Boolean) {
                           val apps = pm.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(cat), 0)
-                              .filter { it.activityInfo.packageName != packageName && it.activityInfo.packageName != STORE_PKG }
+                              .filter { it.activityInfo.packageName != packageName }
                           for (ri in apps) {
                               val pkg = ri.activityInfo.packageName
                               if (!seen.add(pkg)) continue
                               val banner = ri.activityInfo.loadBanner(pm) ?: ri.activityInfo.applicationInfo.loadBanner(pm)
-                              val icon = ri.loadIcon(pm)
+                              var icon = ri.loadIcon(pm)
+                              var themed = false
+                              if (ip != null) {
+                                  val pi = ip.get(android.content.ComponentName(pkg, ri.activityInfo.name))
+                                  if (pi != null) { icon = pi; themed = true }
+                              } else if (pack == "@mono") { icon = Icons.mono(this@MainActivity, icon); themed = true }
+                              else if (pack == "@round") { icon = Icons.badge(this@MainActivity, icon, 0); themed = true }
+                              else if (pack == "@squircle") { icon = Icons.badge(this@MainActivity, icon, 1); themed = true }
+                              if (monoBlur && !themed) icon = Icons.mono(this@MainActivity, icon)
                               val img = banner ?: icon
                               val intent = Intent(Intent.ACTION_MAIN)
                                   .setClassName(pkg, ri.activityInfo.name)
@@ -1237,6 +1662,7 @@ jobs:
 
               private fun updateTitle() {
                   val mv = moving
+                  titleApps.visibility = if (mv == null) View.GONE else View.VISIBLE
                   titleApps.text = if (mv == null) "Your apps" else
                       "Moving " + (shown.firstOrNull { it.pkg == mv }?.label ?: "") + "      \u25C0 \u25B6 move   \u25B2 front   \u25BC end   OK drop"
               }
@@ -1468,17 +1894,106 @@ jobs:
               private fun customize() {
                   val items = arrayListOf(
                       MI("Wallpaper & theme", keep = true) { themeMenu() },
-                      MI("App tiles & layout", keep = true) { section("App tiles & layout", "Tiles") },
+                      MI("App tiles & layout", keep = true) { tilesMenu() },
                       MI("Focus & animations", keep = true) { section("Focus & animations", "Anim") },
                       MI("Top buttons & clock", keep = true) { section("Top buttons & clock", "Buttons") },
                       MI("Speed & memory", keep = true) { section("Speed & memory", "Speed") },
                       MI("CPU / RAM / GPU tiles", keep = true) { section("CPU / RAM / GPU tiles", "System") },
                       MI("Unhide all apps") { store.put("hidden", ""); render() },
                       MI("Reset app order") { store.put("order", ""); render() },
-                      MI("Reset ALL customization") { for (o in OPTS) store.put(o.key, o.def.toString()); applyLook() },
+                      MI("Set as default launcher", value = { if (isDefaultHome()) "Yes" else "No" }) { setAsDefault() },
+                      MI("Reset ALL customization") { for (o in OPTS) store.put(o.key, o.def.toString()); store.put("iconpack", ""); applyLook() },
                       MI("Android system settings") { sys(Settings.ACTION_SETTINGS) }
                   )
                   showMenu("Customize", items, side = true)
+              }
+
+              // ---------- icon packs ----------
+              private fun tilesMenu() {
+                  val head = listOf(MI("Icon pack\u2026", value = { packName() }, keep = true) { iconPackMenu() })
+                  section("App tiles & layout", "Tiles", head)
+              }
+
+              private fun packName(): String {
+                  val p = store.get("iconpack", "")
+                  return when (p) {
+                      "" -> "Original"
+                      "@mono" -> "Monochrome"
+                      "@round" -> "Round badge"
+                      "@squircle" -> "Squircle badge"
+                      else -> try { packageManager.getApplicationLabel(packageManager.getApplicationInfo(p, 0)).toString() } catch (e: Exception) { "Original" }
+                  }
+              }
+
+              private fun findIconPacks(): List<Pair<String, String>> {
+                  val out = LinkedHashMap<String, String>()
+                  val actions = listOf("org.adw.launcher.THEMES", "com.novalauncher.THEME", "com.anddoes.launcher.THEME", "com.gau.go.launcherex.theme")
+                  for (a in actions) {
+                      try {
+                          for (ri in packageManager.queryIntentActivities(Intent(a), 0)) {
+                              val pk = ri.activityInfo.packageName
+                              if (!out.containsKey(pk)) out[pk] = ri.loadLabel(packageManager).toString()
+                          }
+                      } catch (e: Exception) { }
+                  }
+                  return out.map { it.key to it.value }
+              }
+
+              private fun setPack(v: String) {
+                  store.put("iconpack", v)
+                  applyLook()
+                  toast("Icons: " + packName())
+              }
+
+              private fun iconPackMenu() {
+                  val cur = store.get("iconpack", "")
+                  fun mark(v: String) = if (cur == v) "\u25CF " else "    "
+                  val items = ArrayList<MI>()
+                  items.add(MI(mark("") + "Original app icons") { setPack("") })
+                  items.add(MI(mark("@mono") + "Monochrome (cream logos)") { setPack("@mono") })
+                  items.add(MI(mark("@round") + "Round badge") { setPack("@round") })
+                  items.add(MI(mark("@squircle") + "Squircle badge") { setPack("@squircle") })
+                  val packs = findIconPacks()
+                  for ((pk, label) in packs) items.add(MI(mark(pk) + label + "  (icon pack)") { setPack(pk) })
+                  if (packs.isEmpty()) items.add(MI("No icon-pack apps installed. Get one from Play Store.") { openStore() })
+                  showMenu("Icon pack", items, back = { tilesMenu() }, side = true)
+              }
+
+              // ---------- default launcher ----------
+              private fun isDefaultHome(): Boolean = try {
+                  val ri = packageManager.resolveActivity(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME), PackageManager.MATCH_DEFAULT_ONLY)
+                  ri?.activityInfo?.packageName == packageName
+              } catch (e: Exception) { false }
+
+              private fun setAsDefault() {
+                  if (isDefaultHome()) { toast("Cine Launcher is already your home screen"); return }
+                  try {
+                      if (Build.VERSION.SDK_INT >= 29) {
+                          val rm = getSystemService(android.app.role.RoleManager::class.java)
+                          if (rm != null && rm.isRoleAvailable(android.app.role.RoleManager.ROLE_HOME)) {
+                              startActivityForResult(rm.createRequestRoleIntent(android.app.role.RoleManager.ROLE_HOME), 79)
+                              return
+                          }
+                      }
+                  } catch (e: Exception) { }
+                  try {
+                      startActivity(Intent(Settings.ACTION_HOME_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                      return
+                  } catch (e: Exception) { }
+                  toast("Press Home and pick Cine Launcher > Always. Or: adb shell cmd package set-home-activity com.cine.launcher/.MainActivity")
+              }
+
+              private fun askDefaultOnce() {
+                  if (isFinishing || store.gget("askhome") == "1" || isDefaultHome()) return
+                  store.gput("askhome", "1")
+                  try {
+                      AlertDialog.Builder(this)
+                          .setTitle("Make Cine Launcher your home screen?")
+                          .setMessage("Then the Home button always brings you here.")
+                          .setPositiveButton("Yes") { _, _ -> setAsDefault() }
+                          .setNegativeButton("Later", null)
+                          .show()
+                  } catch (e: Exception) { }
               }
 
               // ---------- profiles ----------
@@ -1650,6 +2165,7 @@ jobs:
                       MI("Video input (HDMI, AV)") { inputsMenu() },
                       MI("Free up memory now") { freeMemory(null); toast("Cleaning background apps") },
                       MI("Play Store (add apps)") { openStore() },
+                      MI("Set as default launcher", value = { if (isDefaultHome()) "Yes" else "No" }) { setAsDefault() },
                       MI("Display settings") { openShortcut("video") },
                       MI("Screen saver") { sys("android.settings.DREAM_SETTINGS") },
                       MI("Split screen", value = { if (splitSupported()) "Supported" else "Not supported" }) {
@@ -1936,6 +2452,7 @@ jobs:
               var useIcon = false
               var imgAlpha = 1f
               var gap = 24
+              var blur = false
           }
 
           class Opt(
@@ -1962,6 +2479,9 @@ jobs:
               Opt("accent", "Accent color", listOf("Auto (wallpaper / app)", "Blue", "Purple", "Red", "Green", "Orange", "Pink", "Teal"), 0, "Theme"),
               numOpt("dim", "Wallpaper dim", 0, 80, 10, 30, "Theme", "%"),
               // ---- Tiles ----
+              Opt("blur", "Blur mode (glass bar)", listOf("Off", "On"), 0, "Tiles"),
+              Opt("bstr", "Blur strength", listOf("Low", "Medium", "High"), 1, "Tiles"),
+              Opt("bmono", "Blur mode logos", listOf("Cream logos", "Original colors"), 0, "Tiles"),
               Opt("layout", "Layout", listOf("Recent row + apps", "Two rows", "Single row"), 0, "Tiles"),
               Opt("toprow", "Top row shows", listOf("Recent apps", "Off"), 0, "Tiles"),
               Opt("count", "Apps in big row", listOf("4", "6", "8", "10", "12"), 2, "Tiles"),
@@ -1976,13 +2496,12 @@ jobs:
               numOpt("topac", "Tile opacity", 10, 100, 5, 20, "Tiles", "%"),
               numOpt("bnr", "Artwork opacity", 50, 100, 5, 90, "Tiles", "%"),
               Opt("tedge", "Tile edge line", OnOff, 0, "Tiles"),
-              Opt("addtile", "Add apps [+] tile", ShowHide, 0, "Tiles"),
               Opt("art", "Tile artwork", listOf("Banner", "Icon"), 0, "Tiles"),
               Opt("labels", "App names", listOf("On focus", "Always", "Hidden"), 0, "Tiles"),
               // ---- Focus & animation ----
               Opt("anim", "Animations", OnOff, 0, "Anim"),
               Opt("fdur", "Focus speed", listOf("Instant", "Fast", "Normal", "Slow", "Very slow"), 2, "Anim"),
-              Opt("fstyle", "Focus style", listOf("Smooth zoom", "Bounce", "Lift and zoom", "Snap"), 0, "Anim"),
+              Opt("fstyle", "Focus style", listOf("Smooth zoom", "Bounce", "Lift and zoom", "Snap", "3D pop"), 4, "Anim"),
               Opt("scrmode", "Row scrolling", listOf("Centered (carousel)", "Classic (edge)"), 0, "Anim"),
               Opt("sscr", "Row scroll speed", listOf("Instant", "Fast", "Normal", "Slow"), 2, "Anim"),
               numOpt("focus", "Focus zoom", 100, 140, 2, 112, "Anim", "%"),
@@ -2272,17 +2791,20 @@ jobs:
               </style>
           </resources>
           CINE_EOF
+          mkdir -p 
           cat > build.gradle.kts <<'CINE_EOF'
           plugins {
               id("com.android.application") version "8.5.2" apply false
               id("org.jetbrains.kotlin.android") version "1.9.24" apply false
           }
           CINE_EOF
+          mkdir -p 
           cat > gradle.properties <<'CINE_EOF'
           org.gradle.jvmargs=-Xmx2g
           android.useAndroidX=true
           android.nonTransitiveRClass=true
           CINE_EOF
+          mkdir -p 
           cat > settings.gradle.kts <<'CINE_EOF'
           pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
           dependencyResolutionManagement { repositories { google(); mavenCentral() } }
