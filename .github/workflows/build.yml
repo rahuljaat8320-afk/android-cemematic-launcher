@@ -1145,7 +1145,7 @@ jobs:
                   val m = store.sel("wclose")
                   if (!look.anim || m == 0 || panel == null) { end(); return }
                   val d = adur()
-                  ov.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                  (ov as? ViewGroup)?.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
                   when (m) {
                       2 -> panel.animate().scaleX(0.85f).scaleY(0.85f).setDuration(d).start()
                       3 -> panel.animate().translationY(dp(60).toFloat()).setDuration(d).start()
