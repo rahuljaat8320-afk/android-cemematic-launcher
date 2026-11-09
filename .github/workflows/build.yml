@@ -63,6 +63,7 @@ jobs:
               <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
               <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
               <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+              <uses-permission android:name="android.permission.KILL_BACKGROUND_PROCESSES" />
               <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
               <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
 
@@ -82,6 +83,7 @@ jobs:
                   <package android:name="com.xiaomi.mitv.settings" />
                   <package android:name="com.android.tv.settings" />
                   <package android:name="com.android.settings" />
+              <package android:name="com.android.vending" />
               </queries>
 
               <application
@@ -119,17 +121,20 @@ jobs:
           cat > app/src/main/java/com/cine/launcher/AppAdapter.kt <<'CINE_EOF'
           package com.cine.launcher
 
+          import android.animation.TimeInterpolator
+          import android.animation.ValueAnimator
           import android.content.Intent
-          import android.graphics.Bitmap
           import android.graphics.Canvas
           import android.graphics.Color
           import android.graphics.ColorFilter
+          import android.graphics.LinearGradient
           import android.graphics.Outline
           import android.graphics.Paint
           import android.graphics.Path
           import android.graphics.PixelFormat
           import android.graphics.Rect
           import android.graphics.RectF
+          import android.graphics.Shader
           import android.graphics.Typeface
           import android.graphics.drawable.Drawable
           import android.graphics.drawable.GradientDrawable
@@ -138,33 +143,60 @@ jobs:
           import android.view.View
           import android.view.ViewGroup
           import android.view.ViewOutlineProvider
-          import android.view.animation.DecelerateInterpolator
           import android.view.animation.OvershootInterpolator
+          import android.view.animation.PathInterpolator
           import android.widget.FrameLayout
           import android.widget.ImageView
           import android.widget.LinearLayout
           import android.widget.TextView
+          import androidx.recyclerview.widget.DiffUtil
           import androidx.recyclerview.widget.RecyclerView
 
-          /** Glass / plain tile background. Draws the blurred wallpaper region behind the view when a backdrop is given. */
+          const val ADD_PKG = "__add__"
+          const val STORE_PKG = "com.android.vending"
+
+          /** One shared "ease-out" curve used for tile focus and for row scrolling so everything moves the same way. */
+          val EASE = PathInterpolator(0.22f, 1f, 0.36f, 1f)
+
+          /**
+           * Tile / button background. Translucent fill so the wallpaper shows through.
+           * Call animateFocus() to fade the highlight (brighter fill, shine and outline) in and out smoothly.
+           */
           class TileBg(
-              private val v: View,
-              private val backdrop: Bitmap?,
               private val radius: Float,
               private val color: Int,
               private val fillA: Float,
               private val edge: Boolean,
               private val stroke: Float
           ) : Drawable() {
-              var boost = 0f
-              var ring = false
+              var focusP = 0f
+              var sheenOn = true
+              var ringColor = 0xFFFFFFFF.toInt()
+              private var anim: ValueAnimator? = null
               private val fillP = Paint(Paint.ANTI_ALIAS_FLAG)
               private val lineP = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
-              private val bmpP = Paint(Paint.FILTER_BITMAP_FLAG)
+              private val sheenP = Paint(Paint.ANTI_ALIAS_FLAG)
               private val path = Path()
               private val rect = RectF()
-              private val src = Rect()
-              private val loc = IntArray(2)
+
+              override fun onBoundsChange(bounds: Rect) {
+                  sheenP.shader = LinearGradient(
+                      bounds.left.toFloat(), bounds.top.toFloat(), bounds.right.toFloat(), bounds.bottom.toFloat(),
+                      intArrayOf(0x66FFFFFF, 0x14FFFFFF, 0x00FFFFFF), null, Shader.TileMode.CLAMP
+                  )
+              }
+
+              fun animateFocus(on: Boolean, ms: Long, interp: TimeInterpolator) {
+                  anim?.cancel()
+                  val to = if (on) 1f else 0f
+                  if (ms <= 0L) { focusP = to; invalidateSelf(); return }
+                  anim = ValueAnimator.ofFloat(focusP, to).apply {
+                      duration = ms
+                      interpolator = interp
+                      addUpdateListener { focusP = it.animatedValue as Float; invalidateSelf() }
+                      start()
+                  }
+              }
 
               override fun draw(c: Canvas) {
                   val b = bounds
@@ -174,25 +206,21 @@ jobs:
                   val r = if (radius < 0f) half else minOf(radius, half)
                   path.reset()
                   path.addRoundRect(rect, r, r, Path.Direction.CW)
-                  c.save()
-                  c.clipPath(path)
-                  if (backdrop != null) {
-                      v.getLocationInWindow(loc)
-                      src.set(loc[0], loc[1], loc[0] + b.width(), loc[1] + b.height())
-                      c.drawBitmap(backdrop, src, b, bmpP)
-                  }
-                  val a = ((fillA + boost).coerceIn(0f, 1f) * 255f).toInt()
+                  val a = ((fillA + 0.2f * focusP).coerceIn(0f, 1f) * 255f).toInt()
                   fillP.color = (color and 0x00FFFFFF) or (a shl 24)
-                  c.drawRect(rect, fillP)
-                  c.restore()
+                  c.drawPath(path, fillP)
+                  if (sheenOn && focusP > 0f) {
+                      sheenP.alpha = (focusP * 255f).toInt()
+                      c.drawPath(path, sheenP)
+                  }
                   if (edge) {
                       lineP.strokeWidth = stroke
-                      lineP.color = 0x66FFFFFF
+                      lineP.color = 0x55FFFFFF
                       c.drawPath(path, lineP)
                   }
-                  if (ring) {
+                  if (focusP > 0f) {
                       lineP.strokeWidth = stroke * 2.5f
-                      lineP.color = 0xCCFFFFFF.toInt()
+                      lineP.color = (ringColor and 0x00FFFFFF) or ((0xCC * focusP).toInt() shl 24)
                       c.drawPath(path, lineP)
                   }
               }
@@ -209,24 +237,40 @@ jobs:
               val image: Drawable,
               val icon: Drawable,
               val isBanner: Boolean,
-              val tint: Int?
+              val isAdd: Boolean = false
           )
 
           class AppAdapter(
               private val look: Look,
-              private val onFocus: (AppItem) -> Unit,
               private val onOpen: (AppItem, View) -> Unit,
               private val onMenu: (AppItem) -> Unit
           ) : RecyclerView.Adapter<AppAdapter.VH>() {
 
               var items: List<AppItem> = emptyList()
+              var moving: String? = null
               var cw = 208
               var ch = 117
 
               class VH(
                   val root: LinearLayout, val card: FrameLayout, val img: ImageView,
                   val sheen: View, val ring: View, val label: TextView
-              ) : RecyclerView.ViewHolder(root)
+              ) : RecyclerView.ViewHolder(root) {
+                  var cur: AppItem? = null
+              }
+
+              /** Swap in a new list. Uses a diff so tiles slide to their new place instead of the whole row being rebuilt. */
+              fun setList(n: List<AppItem>) {
+                  val o = items
+                  if (o.isEmpty() || n.isEmpty()) { items = n; notifyDataSetChanged(); return }
+                  val res = DiffUtil.calculateDiff(object : DiffUtil.Callback() {
+                      override fun getOldListSize() = o.size
+                      override fun getNewListSize() = n.size
+                      override fun areItemsTheSame(a: Int, b: Int) = o[a].pkg == n[b].pkg
+                      override fun areContentsTheSame(a: Int, b: Int) = o[a].label == n[b].label && o[a].isBanner == n[b].isBanner
+                  })
+                  items = n
+                  res.dispatchUpdatesTo(this)
+              }
 
               override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
                   val c = parent.context
@@ -243,14 +287,13 @@ jobs:
                   }
                   val card = FrameLayout(c)
                   card.layoutParams = LinearLayout.LayoutParams(dp(cw), dp(ch))
-                  card.background = TileBg(
-                      card, look.backdrop, if (circle) -1f else radius,
-                      look.fillColor, look.fillA, look.edge, d
-                  )
+                  card.background = TileBg(if (circle) -1f else radius, look.fillColor, look.fillA, look.edge, d)
                   card.outlineProvider = object : ViewOutlineProvider() {
                       override fun getOutline(v: View, o: Outline) {
                           val r = if (circle) minOf(v.width, v.height) / 2f else radius
                           o.setRoundRect(0, 0, v.width, v.height, r)
+                          // A see-through tile gets a faint shadow, a solid one a normal shadow.
+                          o.alpha = look.fillA.coerceIn(0f, 1f)
                       }
                   }
                   card.clipToOutline = true
@@ -293,44 +336,127 @@ jobs:
 
               override fun onBindViewHolder(h: VH, position: Int) {
                   val item = items[position]
+                  h.cur = item
                   val d = h.card.resources.displayMetrics.density
-                  val banner = item.isBanner && !look.useIcon
-                  h.img.setImageDrawable(if (look.useIcon) item.icon else item.image)
-                  if (banner) {
-                      h.img.scaleType = ImageView.ScaleType.CENTER_CROP
-                      h.img.setPadding(0, 0, 0, 0)
-                      h.img.alpha = look.imgAlpha
-                  } else {
-                      val pad = (ch * 0.2f * d).toInt()
+                  if (item.isAdd) {
+                      val pad = (ch * 0.26f * d).toInt()
+                      h.img.setImageResource(R.drawable.ic_add)
                       h.img.scaleType = ImageView.ScaleType.FIT_CENTER
                       h.img.setPadding(pad, pad, pad, pad)
                       h.img.alpha = 1f
+                  } else {
+                      val banner = item.isBanner && !look.useIcon
+                      h.img.setImageDrawable(if (look.useIcon) item.icon else item.image)
+                      if (banner) {
+                          h.img.scaleType = ImageView.ScaleType.CENTER_CROP
+                          h.img.setPadding(0, 0, 0, 0)
+                          h.img.alpha = look.imgAlpha
+                      } else {
+                          val pad = (ch * 0.2f * d).toInt()
+                          h.img.scaleType = ImageView.ScaleType.FIT_CENTER
+                          h.img.setPadding(pad, pad, pad, pad)
+                          h.img.alpha = 1f
+                      }
                   }
                   h.label.text = item.label
                   h.label.visibility = if (look.labels == 2) View.GONE else View.VISIBLE
+                  h.card.animate().cancel()
                   h.card.scaleX = 1f; h.card.scaleY = 1f; h.card.translationZ = 0f; h.card.translationY = 0f
                   h.sheen.alpha = 0f
                   h.ring.alpha = 0f
                   h.label.alpha = if (look.labels == 1) 1f else 0f
 
                   h.card.setOnFocusChangeListener { v, focused ->
-                      val s = if (focused) look.scale else 1f
+                      val mv = moving != null && moving == h.cur?.pkg
+                      val s = if (focused) look.scale + (if (mv) 0.08f else 0f) else 1f
                       val dur = if (look.anim && look.style != 3) look.dur else 0L
-                      val lift = if (focused && look.style == 2) -8f * d else 0f
+                      val lift = if (focused && (look.style == 2 || mv)) -8f * d else 0f
+                      val interp: TimeInterpolator = if (look.style == 1) OvershootInterpolator(2.2f) else EASE
                       v.animate().scaleX(s).scaleY(s).translationY(lift)
-                          .translationZ(if (focused) 28 * d else 0f)
-                          .setInterpolator(if (look.style == 1) OvershootInterpolator(2.2f) else DecelerateInterpolator())
+                          .translationZ(if (focused) 16 * d else 0f)
+                          .setInterpolator(interp)
                           .setDuration(dur).start()
                       if (look.sheen) h.sheen.animate().alpha(if (focused) 1f else 0f).setDuration(dur).start()
-                      if (look.ring != 0) h.ring.animate().alpha(if (focused) 1f else 0f).setDuration(dur).start()
+                      h.ring.animate().alpha(if (focused && (look.ring != 0 || mv)) 1f else 0f).setDuration(dur).start()
                       if (look.labels == 0) h.label.animate().alpha(if (focused) 1f else 0f).setDuration(dur).start()
-                      if (focused) onFocus(item)
                   }
                   h.card.setOnClickListener { onOpen(item, h.card) }
-                  h.card.setOnLongClickListener { onMenu(item); true }
+                  if (item.isAdd) h.card.setOnLongClickListener(null)
+                  else h.card.setOnLongClickListener { onMenu(item); true }
               }
 
               override fun getItemCount() = items.size
+          }
+          CINE_EOF
+          mkdir -p app/src/main/java/com/cine/launcher
+          cat > app/src/main/java/com/cine/launcher/CenterLm.kt <<'CINE_EOF'
+          package com.cine.launcher
+
+          import android.content.Context
+          import android.graphics.Rect
+          import android.view.View
+          import androidx.recyclerview.widget.LinearLayoutManager
+          import androidx.recyclerview.widget.RecyclerView
+
+          /**
+           * Horizontal row that behaves like a TV carousel:
+           *  - at the start of the list the cursor walks from the left edge towards the middle,
+           *  - then the cursor stays in the middle and the tiles slide past it,
+           *  - at the end of the list the tiles stop and the cursor walks on to the last tile at the right edge.
+           * All of that falls out of one rule: scroll so the focused tile is centred, but never scroll past either end.
+           */
+          class CenterLm(ctx: Context, private val look: Look) : LinearLayoutManager(ctx, RecyclerView.HORIZONTAL, false) {
+
+              // Keep a few tiles ready off-screen so D-pad moves and the slide animation never wait for a tile to be built.
+              override fun calculateExtraLayoutSpace(state: RecyclerView.State, extraLayoutSpace: IntArray) {
+                  super.calculateExtraLayoutSpace(state, extraLayoutSpace)
+                  val w = width
+                  extraLayoutSpace[0] = maxOf(extraLayoutSpace[0], w / 2)
+                  extraLayoutSpace[1] = maxOf(extraLayoutSpace[1], w / 2)
+              }
+
+              /** How far (px) the row must scroll so that [child] ends up centred, respecting both ends of the list. */
+              private fun targetDx(rv: RecyclerView, child: View): Int {
+                  val n = itemCount
+                  val pos = getPosition(child)
+                  if (pos < 0 || n == 0 || child.width <= 0 || rv.width <= 0) return 0
+                  val lp = child.layoutParams as RecyclerView.LayoutParams
+                  val step = child.width + lp.leftMargin + lp.rightMargin
+                  val padL = rv.paddingLeft
+                  val padR = rv.paddingRight
+                  val viewW = rv.width
+                  val cur = padL + pos * step + lp.leftMargin - child.left              // where the row is scrolled to now
+                  val contentEnd = padL + n * step - lp.rightMargin                       // right edge of the last tile
+                  val maxScroll = maxOf(0, contentEnd - (viewW - padR))
+                  val childCenter = padL + pos * step + lp.leftMargin + child.width / 2
+                  val want = (childCenter - viewW / 2).coerceIn(0, maxScroll)
+                  return want - cur
+              }
+
+              override fun requestChildRectangleOnScreen(
+                  parent: RecyclerView, child: View, rect: Rect, immediate: Boolean, focusedChildVisible: Boolean
+              ): Boolean {
+                  if (!look.centered) return super.requestChildRectangleOnScreen(parent, child, rect, immediate, focusedChildVisible)
+                  val dx = targetDx(parent, child)
+                  if (dx == 0) return false
+                  if (immediate || !look.anim || look.scrollMs <= 0L) parent.scrollBy(dx, 0)
+                  else parent.smoothScrollBy(dx, 0, EASE, look.scrollMs.toInt())
+                  return true
+              }
+
+              /** Slide the row so [child] is centred (used after a tile has been moved). */
+              fun settle(rv: RecyclerView, child: View) {
+                  if (!look.centered) return
+                  val dx = targetDx(rv, child)
+                  if (dx == 0) return
+                  if (!look.anim || look.scrollMs <= 0L) rv.scrollBy(dx, 0)
+                  else rv.smoothScrollBy(dx, 0, EASE, look.scrollMs.toInt())
+              }
+
+              /** Jump (no animation) so the tile at [pos] sits in the middle; the manager clamps this at both ends. */
+              fun jumpCentered(rv: RecyclerView, pos: Int, itemPx: Int) {
+                  scrollToPositionWithOffset(pos, (rv.width - itemPx) / 2)
+              }
           }
           CINE_EOF
           mkdir -p app/src/main/java/com/cine/launcher
@@ -339,8 +465,7 @@ jobs:
 
           import android.Manifest
           import android.accounts.AccountManager
-          import android.animation.ArgbEvaluator
-          import android.animation.ValueAnimator
+          import android.animation.TimeInterpolator
           import android.app.Activity
           import android.app.ActivityManager
           import android.app.ActivityOptions
@@ -351,6 +476,7 @@ jobs:
           import android.content.Context
           import android.content.Intent
           import android.content.IntentFilter
+          import android.content.pm.ApplicationInfo
           import android.content.pm.PackageManager
           import android.content.res.ColorStateList
           import android.content.res.Resources
@@ -369,6 +495,7 @@ jobs:
           import android.media.AudioDeviceInfo
           import android.media.AudioManager
           import android.media.tv.TvContract
+          import android.media.tv.TvInputInfo
           import android.media.tv.TvInputManager
           import android.net.Uri
           import android.net.wifi.WifiManager
@@ -386,6 +513,7 @@ jobs:
           import android.view.View
           import android.view.ViewGroup
           import android.view.animation.DecelerateInterpolator
+          import android.view.animation.OvershootInterpolator
           import android.widget.EditText
           import android.widget.FrameLayout
           import android.widget.ImageView
@@ -394,7 +522,7 @@ jobs:
           import android.widget.ScrollView
           import android.widget.TextView
           import android.widget.Toast
-          import androidx.recyclerview.widget.LinearLayoutManager
+          import androidx.recyclerview.widget.DefaultItemAnimator
           import androidx.recyclerview.widget.RecyclerView
           import java.io.File
           import java.io.FileOutputStream
@@ -409,6 +537,7 @@ jobs:
               val value: (() -> String)? = null,
               val keep: Boolean = false,
               val adj: ((Int) -> Unit)? = null,
+              val icon: Int = 0,
               val run: () -> Unit
           )
 
@@ -419,7 +548,6 @@ jobs:
               private lateinit var root: FrameLayout
               private lateinit var wallView: ImageView
               private lateinit var scrim: View
-              private lateinit var auroraView: View
               private lateinit var content: FrameLayout
               private var overlay: View? = null
               private var focusBefore: View? = null
@@ -435,6 +563,9 @@ jobs:
               private lateinit var audBtn: ImageView
               private lateinit var vidBtn: ImageView
               private lateinit var moreBtn: ImageView
+              private lateinit var inputBtn: ImageView
+              private lateinit var tvSetBtn: ImageView
+              private lateinit var titleApps: TextView
               private lateinit var setBtn: ImageView
               private lateinit var rowR: RecyclerView
               private lateinit var row1: RecyclerView
@@ -442,8 +573,6 @@ jobs:
               private lateinit var aR: AppAdapter
               private lateinit var a1: AppAdapter
               private lateinit var a2: AppAdapter
-              private lateinit var glowA: GradientDrawable
-              private lateinit var glowB: GradientDrawable
               private lateinit var baseBg: ColorDrawable
               private lateinit var statsBox: LinearLayout
               private lateinit var cpuTile: LinearLayout
@@ -467,20 +596,18 @@ jobs:
               private var wallBase: Bitmap? = null
               private var wallKey = ""
               private var wallTint = 0xFF4F7CFF.toInt()
-              private var bdBmp: Bitmap? = null
-              private var bdKey = ""
 
               private val statsTick = object : Runnable { override fun run() { updateStats(); handler.postDelayed(this, 2000) } }
               private val handler = Handler(Looper.getMainLooper())
               private val io = Executors.newSingleThreadExecutor()
-              private val defaultTint = 0xFF3B4CCA.toInt()
               private val accents = arrayOf<Int?>(
                   null, 0xFF3B82F6.toInt(), 0xFF8B5CF6.toInt(), 0xFFEF4444.toInt(),
                   0xFF22C55E.toInt(), 0xFFF59E0B.toInt(), 0xFFEC4899.toInt(), 0xFF14B8A6.toInt()
               )
               private val avatarColors = intArrayOf(0xFF3B4CCA.toInt(), 0xFF0F9D7A.toInt(), 0xFFD9480F.toInt(), 0xFF9C36B5.toInt(), 0xFFC2255C.toInt())
-              private var curTint = defaultTint
-              private var tintAnim: ValueAnimator? = null
+              private var moving: String? = null
+              private var pendingFocus: String? = null
+              private val addItem = AppItem("Add apps", ADD_PKG, Intent(), ColorDrawable(0), ColorDrawable(0), false, true)
               private var master: List<AppItem> = emptyList()
               private var shown: List<AppItem> = emptyList()
               private var splitFirst: AppItem? = null
@@ -498,24 +625,14 @@ jobs:
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
                   store = Store(this)
-                  val dm = resources.displayMetrics
-                  fun glow(cx: Float, cy: Float, r: Float) = GradientDrawable().apply {
-                      gradientType = GradientDrawable.RADIAL_GRADIENT
-                      setGradientCenter(cx, cy)
-                      gradientRadius = r
-                      colors = intArrayOf(0, 0)
-                  }
-                  glowA = glow(0.18f, 0.05f, dm.widthPixels * 0.8f)
-                  glowB = glow(0.95f, 0.6f, dm.widthPixels * 0.6f)
+                  store.migrate()
                   baseBg = ColorDrawable(0xFF05060B.toInt())
                   root = FrameLayout(this).apply { background = baseBg }
                   wallView = ImageView(this).apply { scaleType = ImageView.ScaleType.FIT_XY }
                   scrim = View(this)
-                  auroraView = View(this).apply { background = LayerDrawable(arrayOf<Drawable>(glowA, glowB)) }
                   content = FrameLayout(this).apply { clipChildren = false }
                   root.addView(wallView, FrameLayout.LayoutParams(-1, -1))
                   root.addView(scrim, FrameLayout.LayoutParams(-1, -1))
-                  root.addView(auroraView, FrameLayout.LayoutParams(-1, -1))
                   root.addView(content, FrameLayout.LayoutParams(-1, -1))
                   buildTop()
                   buildStats()
@@ -530,12 +647,15 @@ jobs:
                   addState(StateSet.WILD_CARD, GradientDrawable().apply { setColor(0x22FFFFFF); cornerRadius = dp(r).toFloat() })
               }
 
+              // Same focus animation as the app tiles: zoom, optional lift, fading shine + outline, all on the same ease curve.
               private fun zoomOnFocus(v: View) {
                   v.setOnFocusChangeListener { view, f ->
                       val z = if (f) store.n("bzoom") / 100f else 1f
-                      val d = if (look.anim) look.dur else 0L
-                      view.animate().scaleX(z).scaleY(z).setDuration(d).start()
-                      (view.background as? TileBg)?.let { it.boost = if (f) 0.2f else 0f; it.ring = f; view.invalidate() }
+                      val d = if (look.anim && look.style != 3) look.dur else 0L
+                      val interp: TimeInterpolator = if (look.style == 1) OvershootInterpolator(2.2f) else EASE
+                      val lift = if (f && look.style == 2) -dp(4).toFloat() else 0f
+                      view.animate().scaleX(z).scaleY(z).translationY(lift).setInterpolator(interp).setDuration(d).start()
+                      (view.background as? TileBg)?.animateFocus(f, d, interp)
                   }
               }
 
@@ -570,6 +690,8 @@ jobs:
                   btBtn = iconBtn(R.drawable.ic_btn_bt, "Bluetooth", { pickSettingsPage("bt") }) { toggleBt() }
                   audBtn = iconBtn(R.drawable.ic_btn_audio, "Audio", { pickSettingsPage("audio") }) { openShortcut("audio") }
                   vidBtn = iconBtn(R.drawable.ic_btn_video, "Video", { pickSettingsPage("video") }) { openShortcut("video") }
+                  inputBtn = iconBtn(R.drawable.ic_btn_hdmi, "TV input", { nextInput() }) { inputsMenu() }
+                  tvSetBtn = iconBtn(R.drawable.ic_btn_settings, "TV settings") { sys(Settings.ACTION_SETTINGS) }
                   moreBtn = iconBtn(R.drawable.ic_btn_more, "More") { quickMenu() }
                   setBtn = iconBtn(R.drawable.ic_btn_tune, "Customize") { customize() }
                   content.addView(btnBar)
@@ -592,7 +714,7 @@ jobs:
                   val szN = store.n("bsize")
                   val sz = dp(szN)
                   val gap = dp(store.n("bgap"))
-                  val a = if (look.glass) (100 - store.n("gtr")) / 100f else store.n("bopac") / 100f
+                  val a = store.n("bopac") / 100f
                   val col = tileColorOf(store.sel("bcolor"))
                   val rad = when (store.sel("bshape")) { 0 -> -1f; 1 -> sz * 0.28f; else -> dp(6).toFloat() }
                   val pad = (sz * 0.26f).toInt()
@@ -601,12 +723,16 @@ jobs:
                   show.add(wifiBtn); show.add(btBtn)
                   if (store.sel("baud") == 0) show.add(audBtn)
                   if (store.sel("bvid") == 0) show.add(vidBtn)
+                  if (store.sel("bin") == 0) show.add(inputBtn)
+                  if (store.sel("bset") == 0) show.add(tvSetBtn)
                   if (store.sel("bmore") == 0) show.add(moreBtn)
                   show.add(setBtn)
                   btnBar.removeAllViews()
                   for (v in show) {
-                      v.background = if (v === profBtn) TileBg(v, null, -1f, avatarCol, 1f, false, 0f)
-                      else TileBg(v, look.backdrop, rad, col, a, look.edge, dp(1).toFloat())
+                      val bg = if (v === profBtn) TileBg(-1f, avatarCol, 1f, false, dp(1).toFloat())
+                      else TileBg(rad, col, a, look.edge, dp(1).toFloat())
+                      bg.ringColor = look.ringColor
+                      v.background = bg
                       if (v is ImageView) v.setPadding(pad, pad, pad, pad)
                       btnBar.addView(v, LinearLayout.LayoutParams(sz, sz).apply { marginEnd = gap })
                   }
@@ -666,14 +792,14 @@ jobs:
                   val w = dp(store.n("sw"))
                   val gap = dp(store.n("sgap"))
                   val pad = dp(10)
-                  val a = if (look.glass) (100 - store.n("gtr")) / 100f else store.n("sopac") / 100f
+                  val a = store.n("sopac") / 100f
                   val col = tileColorOf(store.sel("scolor"))
                   val rad = if (store.sel("sshape") == 1) -1f else dp(store.n("scorner")).toFloat()
                   statsBox.removeAllViews()
                   val tiles = listOf(cpuTile to "scpu", ramTile to "sram", gpuTile to "sgpu")
                   for ((t, k) in tiles) {
                       if (store.sel(k) != 0) continue
-                      t.background = TileBg(t, look.backdrop, rad, col, a, look.edge, dp(1).toFloat())
+                      t.background = TileBg(rad, col, a, look.edge, dp(1).toFloat())
                       t.setPadding(pad, pad, pad, pad)
                       statsBox.addView(t, LinearLayout.LayoutParams(w, -2).apply { marginEnd = gap })
                   }
@@ -690,37 +816,45 @@ jobs:
               }
 
               private fun buildRows() {
-                  val onFocus: (AppItem) -> Unit = { app ->
-                      if (!wallOn() && accents[store.sel("accent")] == null) applyTint(app.tint ?: defaultTint)
-                  }
                   val onOpen: (AppItem, View) -> Unit = { app, v -> openApp(app, v) }
                   val onMenu: (AppItem) -> Unit = { app -> appMenu(app) }
-                  aR = AppAdapter(look, onFocus, onOpen, onMenu)
-                  a1 = AppAdapter(look, onFocus, onOpen, onMenu)
-                  a2 = AppAdapter(look, onFocus, onOpen, onMenu)
+                  aR = AppAdapter(look, onOpen, onMenu)
+                  a1 = AppAdapter(look, onOpen, onMenu)
+                  a2 = AppAdapter(look, onOpen, onMenu)
                   fun rowOf(a: AppAdapter) = RecyclerView(this).apply {
-                      layoutManager = LinearLayoutManager(this@MainActivity, RecyclerView.HORIZONTAL, false)
+                      layoutManager = CenterLm(this@MainActivity, look)
                       adapter = a
                       clipToPadding = false
                       clipChildren = false
                       setPadding(dp(48), dp(14), dp(48), dp(14))
                       overScrollMode = View.OVER_SCROLL_NEVER
                       itemAnimator = null
-                      addOnScrollListener(object : RecyclerView.OnScrollListener() {
-                          override fun onScrolled(rv: RecyclerView, dx: Int, dy: Int) {
-                              if (look.glass && look.backdrop != null) {
-                                  for (i in 0 until rv.childCount) (rv.getChildAt(i) as ViewGroup).getChildAt(0)?.invalidate()
-                              }
-                          }
-                      })
+                      setItemViewCacheSize(6)
                   }
                   rowR = rowOf(aR); row1 = rowOf(a1); row2 = rowOf(a2)
+                  // Only the main row animates tiles sliding to a new place (when you move an app).
+                  row1.itemAnimator = DefaultItemAnimator().apply {
+                      supportsChangeAnimations = false
+                      moveDuration = 220
+                      addDuration = 0
+                      removeDuration = 0
+                      changeDuration = 0
+                  }
+                  titleApps = TextView(this).apply {
+                      text = "Your apps"
+                      setTextColor(Color.WHITE)
+                      textSize = 20f
+                      typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+                      setShadowLayer(8f, 0f, 2f, 0x99000000.toInt())
+                      setPadding(dp(52), dp(4), dp(48), 0)
+                  }
                   val bottom = LinearLayout(this).apply {
                       orientation = LinearLayout.VERTICAL
                       clipChildren = false
                       setPadding(0, 0, 0, dp(8))
                   }
                   bottom.addView(rowR, LinearLayout.LayoutParams(-1, -2))
+                  bottom.addView(titleApps, LinearLayout.LayoutParams(-1, -2))
                   bottom.addView(row1, LinearLayout.LayoutParams(-1, -2))
                   bottom.addView(row2, LinearLayout.LayoutParams(-1, -2))
                   content.addView(bottom, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
@@ -736,7 +870,6 @@ jobs:
               private fun tileColorOf(idx: Int): Int = if (idx == 3) themeAccent() else COLOR_VALS[idx]
 
               private fun applyLook() {
-                  look.glass = store.sel("glass") == 1
                   look.anim = store.sel("anim") == 0
                   prepareBackground()
                   baseBg.color = if (store.sel("bg") == 1) Color.BLACK else 0xFF05060B.toInt()
@@ -752,11 +885,12 @@ jobs:
                   look.ring = store.sel("ring")
                   look.ringColor = if (look.ring == 2) themeAccent() else Color.WHITE
                   look.useIcon = store.sel("art") == 1
-                  val tr = store.n("gtr")
                   look.fillColor = tileColorOf(store.sel("tcolor"))
-                  look.fillA = if (look.glass) (100 - tr) / 100f else store.n("topac") / 100f
-                  look.edge = look.glass && store.sel("gedge") == 0
-                  look.imgAlpha = if (look.glass) 0.45f + 0.55f * (100 - tr) / 100f else 1f
+                  look.fillA = store.n("topac") / 100f
+                  look.edge = store.sel("tedge") == 0
+                  look.imgAlpha = store.n("bnr") / 100f
+                  look.centered = store.sel("scrmode") == 0
+                  look.scrollMs = longArrayOf(0, 160, 240, 360)[store.sel("sscr")]
 
                   val tw = store.n("tw")
                   val small = tw * store.n("rs") / 100
@@ -769,9 +903,6 @@ jobs:
                   refreshProfile()
                   styleTop()
                   styleStats()
-                  val fixed = accents[store.sel("accent")]
-                  val base = fixed ?: if (wallOn()) wallTint else null
-                  if (base != null) applyTint(base) else paintGlow(curTint)
                   updateTime()
                   refreshToggles()
                   render()
@@ -784,7 +915,6 @@ jobs:
                   if (key != wallKey) {
                       wallBase = loadCover(f)
                       wallKey = key
-                      bdKey = ""
                       val wb = wallBase
                       if (wb != null) {
                           val s = Bitmap.createScaledBitmap(wb, 32, 18, true)
@@ -798,19 +928,12 @@ jobs:
                   val dim = store.n("dim")
                   scrim.setBackgroundColor((dim * 255 / 100) shl 24)
                   scrim.visibility = View.VISIBLE
-                  if (look.glass) {
-                      val lvl = store.sel("gblur")
-                      val k2 = key + "|" + dim + "|" + lvl
-                      if (k2 != bdKey) { bdBmp = makeBackdrop(base, lvl, dim); bdKey = k2 }
-                      look.backdrop = bdBmp
-                  } else look.backdrop = null
               }
 
               private fun clearWall() {
-                  wallBase = null; wallKey = ""; bdBmp = null; bdKey = ""
+                  wallBase = null; wallKey = ""
                   wallView.setImageDrawable(null)
                   scrim.visibility = View.GONE
-                  look.backdrop = null
               }
 
               private fun loadCover(f: File): Bitmap? = try {
@@ -835,82 +958,11 @@ jobs:
                   }
               } catch (e: Exception) { null }
 
-              private fun makeBackdrop(base: Bitmap, lvl: Int, dim: Int): Bitmap {
-                  val w = base.width
-                  val h = base.height
-                  var bmp: Bitmap
-                  if (lvl == 0) {
-                      bmp = base.copy(Bitmap.Config.ARGB_8888, true)
-                  } else {
-                      val sw = maxOf(w / 8, 16)
-                      val sh = maxOf(h / 8, 9)
-                      val small = Bitmap.createScaledBitmap(base, sw, sh, true).copy(Bitmap.Config.ARGB_8888, true)
-                      val px = IntArray(sw * sh)
-                      small.getPixels(px, 0, sw, 0, 0, sw, sh)
-                      val tmp = IntArray(px.size)
-                      val r = lvl * 2
-                      for (pass in 0 until 2) {
-                          blur1d(px, tmp, sh, sw, sw, 1, r)
-                          blur1d(tmp, px, sw, sh, 1, sw, r)
-                      }
-                      small.setPixels(px, 0, sw, 0, 0, sw, sh)
-                      bmp = Bitmap.createScaledBitmap(small, w, h, true)
-                      if (!bmp.isMutable) bmp = bmp.copy(Bitmap.Config.ARGB_8888, true)
-                  }
-                  if (dim > 0) Canvas(bmp).drawColor((dim * 255 / 100) shl 24)
-                  return bmp
-              }
-
-              private fun blur1d(src: IntArray, dst: IntArray, lines: Int, len: Int, lineStep: Int, elemStep: Int, r: Int) {
-                  val div = 2 * r + 1
-                  for (ln in 0 until lines) {
-                      val base = ln * lineStep
-                      var ra = 0; var ga = 0; var ba = 0
-                      for (i in -r..r) {
-                          val p = src[base + i.coerceIn(0, len - 1) * elemStep]
-                          ra += (p shr 16) and 255; ga += (p shr 8) and 255; ba += p and 255
-                      }
-                      for (k in 0 until len) {
-                          dst[base + k * elemStep] = (0xFF shl 24) or ((ra / div) shl 16) or ((ga / div) shl 8) or (ba / div)
-                          val add = src[base + (k + r + 1).coerceAtMost(len - 1) * elemStep]
-                          val sub = src[base + (k - r).coerceAtLeast(0) * elemStep]
-                          ra += ((add shr 16) and 255) - ((sub shr 16) and 255)
-                          ga += ((add shr 8) and 255) - ((sub shr 8) and 255)
-                          ba += (add and 255) - (sub and 255)
-                      }
-                  }
-              }
-
               private fun refreshProfile() {
                   val p = store.profile()
                   val name = p.getString("name")
                   profBtn.text = name.take(1).uppercase()
                   avatarCol = avatarColors[Math.abs(p.getString("id").hashCode()) % avatarColors.size]
-              }
-
-              private fun paintGlow(c: Int) {
-                  if (store.sel("aurora") != 0) {
-                      glowA.colors = intArrayOf(0, 0); glowB.colors = intArrayOf(0, 0)
-                      return
-                  }
-                  val k = floatArrayOf(0.6f, 1f, 1.5f)[store.sel("aurstr")] * (if (wallOn()) 0.75f else 1f)
-                  val al1 = (0x77 * k).toInt().coerceIn(0, 255)
-                  val al2 = (0x55 * k).toInt().coerceIn(0, 255)
-                  glowA.colors = intArrayOf((c and 0x00FFFFFF) or (al1 shl 24), 0x00000000)
-                  val hsv = FloatArray(3)
-                  Color.colorToHSV(c, hsv)
-                  hsv[0] = (hsv[0] + 50f) % 360f
-                  glowB.colors = intArrayOf((Color.HSVToColor(hsv) and 0x00FFFFFF) or (al2 shl 24), 0x00000000)
-              }
-
-              private fun applyTint(target: Int) {
-                  tintAnim?.cancel()
-                  if (!look.anim) { curTint = target; paintGlow(target); return }
-                  tintAnim = ValueAnimator.ofObject(ArgbEvaluator(), curTint, target).apply {
-                      duration = 400
-                      addUpdateListener { curTint = it.animatedValue as Int; paintGlow(curTint) }
-                      start()
-                  }
               }
 
               private fun dominant(bmp: Bitmap): Int? {
@@ -931,16 +983,6 @@ jobs:
                   hsv[2] = hsv[2].coerceAtLeast(0.85f)
                   return Color.HSVToColor(hsv)
               }
-
-              private fun tintOf(src: Drawable): Int? = try {
-                  val dd = src.constantState?.newDrawable()?.mutate() ?: src
-                  val bmp = Bitmap.createBitmap(12, 12, Bitmap.Config.ARGB_8888)
-                  dd.setBounds(0, 0, 12, 12)
-                  dd.draw(Canvas(bmp))
-                  val res = dominant(bmp)
-                  bmp.recycle()
-                  res
-              } catch (e: Exception) { null }
 
               // ---------- wallpaper picking ----------
               private fun pickWallpaper() {
@@ -1017,19 +1059,46 @@ jobs:
                   if (ord.isNotEmpty()) list = list.sortedBy { val i = ord.indexOf(it.pkg); if (i < 0) Int.MAX_VALUE else i }
                   shown = list
                   val n = intArrayOf(4, 6, 8, 10, 12)[store.sel("count")]
+                  val plus = if (store.sel("addtile") == 0) listOf(addItem) else emptyList()
                   when (store.sel("layout")) {
                       0 -> {
-                          aR.items = if (store.sel("toprow") == 0) store.list("recent").mapNotNull { p -> list.firstOrNull { it.pkg == p } } else emptyList()
-                          a1.items = list; a2.items = emptyList()
+                          aR.setList(if (store.sel("toprow") == 0) store.list("recent").mapNotNull { p -> list.firstOrNull { it.pkg == p } } else emptyList())
+                          a1.setList(plus + list); a2.setList(emptyList())
                       }
-                      1 -> { aR.items = emptyList(); a1.items = list.take(n); a2.items = list.drop(n) }
-                      else -> { aR.items = emptyList(); a1.items = list; a2.items = emptyList() }
+                      1 -> { aR.setList(emptyList()); a1.setList(plus + list.take(n)); a2.setList(list.drop(n)) }
+                      else -> { aR.setList(emptyList()); a1.setList(plus + list); a2.setList(emptyList()) }
                   }
-                  aR.notifyDataSetChanged(); a1.notifyDataSetChanged(); a2.notifyDataSetChanged()
                   rowR.visibility = if (aR.items.isEmpty()) View.GONE else View.VISIBLE
                   row2.visibility = if (a2.items.isEmpty()) View.GONE else View.VISIBLE
+                  titleApps.visibility = if (a1.items.isEmpty()) View.GONE else View.VISIBLE
                   if (overlay == null) row1.post {
-                      if (focusPending || currentFocus == null) { if (row1.getChildAt(0)?.requestFocus() == true) focusPending = false }
+                      if (moving == null && (focusPending || currentFocus == null)) { if (focusFirstApp()) focusPending = false }
+                  }
+              }
+
+              /** Puts the cursor on the first real app (the [+] tile sits just to its left). */
+              private fun focusFirstApp(): Boolean {
+                  val pos = if (a1.items.size > 1) 1 else 0
+                  val vh = row1.findViewHolderForAdapterPosition(pos) as? AppAdapter.VH
+                  if (vh != null) return vh.card.requestFocus()
+                  return row1.getChildAt(0)?.requestFocus() == true
+              }
+
+              /** Puts the cursor on the tile of [pk] in the main rows, centring the row on it. */
+              private fun focusMainTile(pk: String) {
+                  for ((rv, ad) in listOf(row1 to a1, row2 to a2)) {
+                      val i = ad.items.indexOfFirst { it.pkg == pk }
+                      if (i < 0) continue
+                      val lm = rv.layoutManager as? CenterLm
+                      val vh = rv.findViewHolderForAdapterPosition(i) as? AppAdapter.VH
+                      if (vh != null) {
+                          if (!vh.card.hasFocus()) vh.card.requestFocus()
+                          lm?.settle(rv, vh.root)
+                      } else if (lm != null) {
+                          lm.jumpCentered(rv, i, (ad.cw * resources.displayMetrics.density).toInt())
+                          rv.post { (rv.findViewHolderForAdapterPosition(i) as? AppAdapter.VH)?.card?.requestFocus() }
+                      }
+                      return
                   }
               }
 
@@ -1044,7 +1113,7 @@ jobs:
                       val lean = HashSet<String>()
                       fun add(cat: String, isLeanCat: Boolean) {
                           val apps = pm.queryIntentActivities(Intent(Intent.ACTION_MAIN).addCategory(cat), 0)
-                              .filter { it.activityInfo.packageName != packageName }
+                              .filter { it.activityInfo.packageName != packageName && it.activityInfo.packageName != STORE_PKG }
                           for (ri in apps) {
                               val pkg = ri.activityInfo.packageName
                               if (!seen.add(pkg)) continue
@@ -1055,7 +1124,7 @@ jobs:
                                   .setClassName(pkg, ri.activityInfo.name)
                                   .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                               if (isLeanCat) lean.add(pkg)
-                              result.add(AppItem(ri.loadLabel(pm).toString(), pkg, intent, img, icon, banner != null, tintOf(img)))
+                              result.add(AppItem(ri.loadLabel(pm).toString(), pkg, intent, img, icon, banner != null))
                           }
                       }
                       add(Intent.CATEGORY_LEANBACK_LAUNCHER, true)
@@ -1083,10 +1152,48 @@ jobs:
               } catch (e: Exception) { null }
 
               private fun launchApp(a: AppItem, v: View?) {
+                  if (store.sel("kill") == 0) freeMemory(a.pkg)
                   try { startActivity(a.intent, launchOpts(v)); recordRecent(a.pkg) } catch (e: Exception) { toast("Can't open " + a.label) }
               }
 
+              private fun openStore() {
+                  try {
+                      val i = packageManager.getLeanbackLaunchIntentForPackage(STORE_PKG) ?: packageManager.getLaunchIntentForPackage(STORE_PKG)
+                      if (i != null) { startActivity(i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); return }
+                  } catch (e: Exception) { }
+                  try {
+                      startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("market://search?q=apps")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                  } catch (e: Exception) { toast("Play Store isn't available on this TV") }
+              }
+
+              private val keepAlive = setOf("com.google.android.gms", "com.google.android.gsf", "com.android.vending")
+
+              /**
+               * Asks Android to drop the background processes of every other app you installed, so the app you just opened gets the memory.
+               * Android only lets a normal app do this to apps that are NOT on screen and have no foreground service
+               * (so playing music / downloads keep going). Built-in system apps are left alone.
+               */
+              private fun freeMemory(except: String?) {
+                  val apps = master
+                  io.execute {
+                      try {
+                          val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+                          for (a in apps) {
+                              val pk = a.pkg
+                              if (pk == except || pk == packageName || pk in keepAlive) continue
+                              try {
+                                  val fl = packageManager.getApplicationInfo(pk, 0).flags
+                                  val builtIn = (fl and ApplicationInfo.FLAG_SYSTEM) != 0 && (fl and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) == 0
+                                  if (builtIn) continue
+                              } catch (e: Exception) { continue }
+                              am.killBackgroundProcesses(pk)
+                          }
+                      } catch (e: Exception) { }
+                  }
+              }
+
               private fun openApp(a: AppItem, v: View?) {
+                  if (a.isAdd) { openStore(); return }
                   val f = splitFirst
                   splitFirst = null
                   if (f != null && f.pkg != a.pkg) {
@@ -1115,13 +1222,62 @@ jobs:
 
               private fun saveOrder(l: List<String>) { store.put("order", l.joinToString(",")); render() }
 
-              private fun move(pk: String, dir: Int) {
+              /** Moves app [pk] to position [to] in the main list (0 = front, a huge number = end). */
+              private fun reorder(pk: String, to: Int) {
                   val l = shown.map { it.pkg }.toMutableList()
                   val i = l.indexOf(pk)
-                  val j = i + dir
-                  if (i < 0 || j < 0 || j >= l.size) return
-                  Collections.swap(l, i, j)
+                  if (i < 0) return
+                  val j = to.coerceIn(0, l.size - 1)
+                  if (i == j) return
+                  l.removeAt(i)
+                  l.add(j, pk)
                   saveOrder(l)
+                  if (moving != null) row1.post { focusMainTile(pk) }
+              }
+
+              private fun updateTitle() {
+                  val mv = moving
+                  titleApps.text = if (mv == null) "Your apps" else
+                      "Moving " + (shown.firstOrNull { it.pkg == mv }?.label ?: "") + "      \u25C0 \u25B6 move   \u25B2 front   \u25BC end   OK drop"
+              }
+
+              private fun startMove(app: AppItem) {
+                  moving = app.pkg
+                  aR.moving = app.pkg; a1.moving = app.pkg; a2.moving = app.pkg
+                  updateTitle()
+              }
+
+              private fun stopMove() {
+                  moving = null
+                  aR.moving = null; a1.moving = null; a2.moving = null
+                  updateTitle()
+                  val f = currentFocus
+                  if (f != null) f.onFocusChangeListener?.onFocusChange(f, true)
+              }
+
+              // While an app is picked up, the D-pad moves the app instead of the cursor.
+              override fun dispatchKeyEvent(ev: KeyEvent): Boolean {
+                  val mv = moving
+                  if (mv != null && overlay == null) {
+                      val k = ev.keyCode
+                      val ours = k == KeyEvent.KEYCODE_DPAD_LEFT || k == KeyEvent.KEYCODE_DPAD_RIGHT ||
+                          k == KeyEvent.KEYCODE_DPAD_UP || k == KeyEvent.KEYCODE_DPAD_DOWN ||
+                          k == KeyEvent.KEYCODE_DPAD_CENTER || k == KeyEvent.KEYCODE_ENTER || k == KeyEvent.KEYCODE_BACK
+                      if (ours) {
+                          if (ev.action == KeyEvent.ACTION_DOWN) {
+                              val at = shown.indexOfFirst { it.pkg == mv }
+                              when (k) {
+                                  KeyEvent.KEYCODE_DPAD_LEFT -> reorder(mv, at - 1)
+                                  KeyEvent.KEYCODE_DPAD_RIGHT -> reorder(mv, at + 1)
+                                  KeyEvent.KEYCODE_DPAD_UP -> reorder(mv, 0)
+                                  KeyEvent.KEYCODE_DPAD_DOWN -> reorder(mv, Int.MAX_VALUE)
+                                  else -> stopMove()
+                              }
+                          }
+                          return true
+                      }
+                  }
+                  return super.dispatchKeyEvent(ev)
               }
 
               // ---------- menus ----------
@@ -1143,7 +1299,8 @@ jobs:
 
               private fun animOut(ov: View, panel: View?, end: () -> Unit) {
                   val m = store.sel("wclose")
-                  if (!look.anim || m == 0 || panel == null) { end(); return }
+                  // post: lets the menu item that was just clicked finish its own work before focus is handed back
+                  if (!look.anim || m == 0 || panel == null) { handler.post { end() }; return }
                   val d = adur()
                   (ov as? ViewGroup)?.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
                   when (m) {
@@ -1172,10 +1329,7 @@ jobs:
                       orientation = LinearLayout.VERTICAL
                       setPadding(dp(20), dp(18), dp(20), dp(14))
                   }
-                  panel.background = TileBg(
-                      panel, look.backdrop, dp(18).toFloat(), 0xFF121826.toInt(),
-                      if (look.glass) 0.55f else 0.95f, look.edge, dp(1).toFloat()
-                  )
+                  panel.background = TileBg(dp(18).toFloat(), 0xFF121826.toInt(), 0.94f, look.edge, dp(1).toFloat())
                   panel.addView(TextView(this).apply {
                       text = title; setTextColor(Color.WHITE); textSize = 20f
                       typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
@@ -1190,6 +1344,10 @@ jobs:
                           setPadding(dp(14), 0, dp(14), 0)
                           isFocusable = true
                           background = pillBg(10)
+                      }
+                      if (mi.icon != 0) {
+                          val iv = ImageView(this).apply { setImageResource(mi.icon); setColorFilter(Color.WHITE) }
+                          row.addView(iv, LinearLayout.LayoutParams(dp(24), dp(24)).apply { marginEnd = dp(14) })
                       }
                       val l = TextView(this).apply { text = mi.label; setTextColor(Color.WHITE); textSize = 16f; maxLines = 1 }
                       val v = TextView(this).apply { text = rowVal(mi); setTextColor(0xFF9DB4FF.toInt()); textSize = 15f }
@@ -1238,7 +1396,11 @@ jobs:
                       if (overlay == null) {
                           val f = focusBefore
                           focusBefore = null
-                          if (f != null && f.isAttachedToWindow) f.requestFocus() else row1.post { row1.getChildAt(0)?.requestFocus() }
+                          val target = moving ?: pendingFocus
+                          pendingFocus = null
+                          if (target != null) focusMainTile(target)
+                          else if (f != null && f.isAttachedToWindow) f.requestFocus()
+                          else row1.post { focusFirstApp() }
                       }
                   }
               }
@@ -1256,9 +1418,9 @@ jobs:
                   val uri = Uri.parse("package:" + pk)
                   val items = arrayListOf(
                       MI("Open") { launchApp(app, null) },
-                      MI("Pin to front") { saveOrder(listOf(pk) + shown.map { it.pkg }.filter { it != pk }) },
-                      MI("Move left") { move(pk, -1) },
-                      MI("Move right") { move(pk, 1) },
+                      MI("Move this app (pick & drop)") { startMove(app) },
+                      MI("Send to front") { pendingFocus = pk; reorder(pk, 0) },
+                      MI("Send to end") { pendingFocus = pk; reorder(pk, Int.MAX_VALUE) },
                       MI("Hide from home") { store.put("hidden", (store.list("hidden") + pk).joinToString(",")); render() },
                       MI("Open side by side with\u2026") { startSplit(app) },
                       MI("App info") { startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) },
@@ -1306,10 +1468,10 @@ jobs:
               private fun customize() {
                   val items = arrayListOf(
                       MI("Wallpaper & theme", keep = true) { themeMenu() },
-                      MI("Glass mode (blur & transparency)", keep = true) { section("Glass mode", "Glass") },
                       MI("App tiles & layout", keep = true) { section("App tiles & layout", "Tiles") },
                       MI("Focus & animations", keep = true) { section("Focus & animations", "Anim") },
                       MI("Top buttons & clock", keep = true) { section("Top buttons & clock", "Buttons") },
+                      MI("Speed & memory", keep = true) { section("Speed & memory", "Speed") },
                       MI("CPU / RAM / GPU tiles", keep = true) { section("CPU / RAM / GPU tiles", "System") },
                       MI("Unhide all apps") { store.put("hidden", ""); render() },
                       MI("Reset app order") { store.put("order", ""); render() },
@@ -1437,21 +1599,39 @@ jobs:
                   if (names.isEmpty()) "none found" else names.joinToString(", ")
               } catch (e: Exception) { "unknown" }
 
+              private fun passInputs(): List<TvInputInfo> = try {
+                  val tm = getSystemService(Context.TV_INPUT_SERVICE) as TvInputManager
+                  tm.tvInputList.filter { it.isPassthroughInput }.sortedBy { inputLabel(it).lowercase() }
+              } catch (e: Exception) { emptyList() }
+
+              private fun inputLabel(info: TvInputInfo): String = try {
+                  (info.loadCustomLabel(this) ?: info.loadLabel(this)).toString()
+              } catch (e: Exception) { info.id }
+
+              private fun switchInput(info: TvInputInfo) {
+                  val label = inputLabel(info)
+                  try {
+                      startActivity(Intent(Intent.ACTION_VIEW, TvContract.buildChannelUriForPassthroughInput(info.id)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                      store.gput("lastin", info.id)
+                  } catch (e: Exception) { toast("Couldn't switch to " + label) }
+              }
+
+              // Hold OK on the input button: jump straight to the next input (HDMI 1 -> 2 -> 3 -> ...).
+              private fun nextInput() {
+                  val ins = passInputs()
+                  if (ins.isEmpty()) { toast("No inputs found on this TV"); return }
+                  val i = ins.indexOfFirst { it.id == store.gget("lastin") }
+                  val next = ins[(i + 1) % ins.size]
+                  toast(inputLabel(next))
+                  switchInput(next)
+              }
+
               private fun inputsMenu() {
                   val items = ArrayList<MI>()
-                  try {
-                      val tm = getSystemService(Context.TV_INPUT_SERVICE) as TvInputManager
-                      for (info in tm.tvInputList) {
-                          if (!info.isPassthroughInput) continue
-                          val label = (info.loadCustomLabel(this) ?: info.loadLabel(this)).toString()
-                          val id = info.id
-                          items.add(MI(label) {
-                              try {
-                                  startActivity(Intent(Intent.ACTION_VIEW, TvContract.buildChannelUriForPassthroughInput(id)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
-                              } catch (e: Exception) { toast("Couldn't switch to " + label) }
-                          })
-                      }
-                  } catch (e: Exception) { }
+                  for (info in passInputs()) {
+                      val icon = if (info.type == TvInputInfo.TYPE_HDMI) R.drawable.ic_btn_hdmi else R.drawable.ic_btn_input
+                      items.add(MI(inputLabel(info), icon = icon) { switchInput(info) })
+                  }
                   if (items.isEmpty()) items.add(MI("No inputs found. Open TV settings") { sys(Settings.ACTION_SETTINGS) })
                   showMenu("Switch input", items)
               }
@@ -1468,6 +1648,8 @@ jobs:
                       MI("Volume down", keep = true) { am.adjustStreamVolume(AudioManager.STREAM_MUSIC, AudioManager.ADJUST_LOWER, AudioManager.FLAG_SHOW_UI) },
                       MI("Audio output", value = { outputs() }) { openShortcut("audio") },
                       MI("Video input (HDMI, AV)") { inputsMenu() },
+                      MI("Free up memory now") { freeMemory(null); toast("Cleaning background apps") },
+                      MI("Play Store (add apps)") { openStore() },
                       MI("Display settings") { openShortcut("video") },
                       MI("Screen saver") { sys("android.settings.DREAM_SETTINGS") },
                       MI("Split screen", value = { if (splitSupported()) "Supported" else "Not supported" }) {
@@ -1706,9 +1888,10 @@ jobs:
               override fun onNewIntent(intent: Intent?) {
                   super.onNewIntent(intent)
                   if (overlay != null) closeMenu()
+                  if (moving != null) stopMove()
                   focusPending = true
                   row1.scrollToPosition(0)
-                  row1.post { row1.getChildAt(0)?.requestFocus() }
+                  row1.post { focusFirstApp() }
               }
 
               @Deprecated("Home screen: back only closes menus")
@@ -1731,7 +1914,6 @@ jobs:
           package com.cine.launcher
 
           import android.content.Context
-          import android.graphics.Bitmap
           import org.json.JSONArray
           import org.json.JSONObject
 
@@ -1744,11 +1926,11 @@ jobs:
               var anim = true
               var dur = 160L
               var style = 0
-              var glass = false
+              var centered = true
+              var scrollMs = 240L
               var fillColor = 0xFF1E2434.toInt()
               var fillA = 1f
-              var edge = false
-              var backdrop: Bitmap? = null
+              var edge = true
               var ring = 0
               var ringColor = 0xFFFFFFFF.toInt()
               var useIcon = false
@@ -1776,16 +1958,9 @@ jobs:
           val OPTS = listOf(
               // ---- Theme ----
               Opt("wall", "Wallpaper", listOf("Off", "On"), 0, "Theme"),
-              Opt("aurora", "Aurora glow", OnOff, 0, "Theme"),
-              Opt("aurstr", "Aurora strength", listOf("Soft", "Medium", "Strong"), 1, "Theme"),
               Opt("bg", "Base color", listOf("Dark", "Black"), 0, "Theme"),
               Opt("accent", "Accent color", listOf("Auto (wallpaper / app)", "Blue", "Purple", "Red", "Green", "Orange", "Pink", "Teal"), 0, "Theme"),
               numOpt("dim", "Wallpaper dim", 0, 80, 10, 30, "Theme", "%"),
-              // ---- Glass ----
-              Opt("glass", "Glass mode", listOf("Off", "On"), 0, "Glass"),
-              numOpt("gtr", "Glass transparency", 30, 95, 5, 75, "Glass", "%"),
-              Opt("gblur", "Glass blur", listOf("Off", "Light", "Medium", "Strong", "Max"), 2, "Glass"),
-              Opt("gedge", "Glass edge shine", OnOff, 0, "Glass"),
               // ---- Tiles ----
               Opt("layout", "Layout", listOf("Recent row + apps", "Two rows", "Single row"), 0, "Tiles"),
               Opt("toprow", "Top row shows", listOf("Recent apps", "Off"), 0, "Tiles"),
@@ -1797,14 +1972,19 @@ jobs:
               numOpt("gap", "Tile spacing", 8, 48, 4, 24, "Tiles", " dp"),
               Opt("tshape", "Tile shape", listOf("Rounded", "Circle / pill"), 0, "Tiles"),
               numOpt("corner", "Corner radius", 0, 60, 2, 18, "Tiles", " dp"),
-              Opt("tcolor", "Tile color", COLOR_NAMES, 0, "Tiles"),
-              numOpt("topac", "Tile opacity", 20, 100, 5, 100, "Tiles", "%"),
+              Opt("tcolor", "Tile color", COLOR_NAMES, 2, "Tiles"),
+              numOpt("topac", "Tile opacity", 10, 100, 5, 20, "Tiles", "%"),
+              numOpt("bnr", "Artwork opacity", 50, 100, 5, 90, "Tiles", "%"),
+              Opt("tedge", "Tile edge line", OnOff, 0, "Tiles"),
+              Opt("addtile", "Add apps [+] tile", ShowHide, 0, "Tiles"),
               Opt("art", "Tile artwork", listOf("Banner", "Icon"), 0, "Tiles"),
               Opt("labels", "App names", listOf("On focus", "Always", "Hidden"), 0, "Tiles"),
               // ---- Focus & animation ----
               Opt("anim", "Animations", OnOff, 0, "Anim"),
               Opt("fdur", "Focus speed", listOf("Instant", "Fast", "Normal", "Slow", "Very slow"), 2, "Anim"),
               Opt("fstyle", "Focus style", listOf("Smooth zoom", "Bounce", "Lift and zoom", "Snap"), 0, "Anim"),
+              Opt("scrmode", "Row scrolling", listOf("Centered (carousel)", "Classic (edge)"), 0, "Anim"),
+              Opt("sscr", "Row scroll speed", listOf("Instant", "Fast", "Normal", "Slow"), 2, "Anim"),
               numOpt("focus", "Focus zoom", 100, 140, 2, 112, "Anim", "%"),
               Opt("sheen", "Focus shine", OnOff, 0, "Anim"),
               Opt("ring", "Focus outline", listOf("Off", "White", "Accent"), 0, "Anim"),
@@ -1825,10 +2005,14 @@ jobs:
               Opt("bprof", "Profile button", ShowHide, 0, "Buttons"),
               Opt("baud", "Audio button", ShowHide, 0, "Buttons"),
               Opt("bvid", "Video button", ShowHide, 0, "Buttons"),
+              Opt("bin", "TV input (HDMI) button", ShowHide, 0, "Buttons"),
+              Opt("bset", "TV settings button", ShowHide, 0, "Buttons"),
               Opt("bmore", "More button", ShowHide, 0, "Buttons"),
               Opt("cpos", "Clock position", listOf("Right", "Left", "Center", "Hidden"), 0, "Buttons"),
               numOpt("csize", "Clock size", 20, 60, 2, 34, "Buttons", " sp"),
               Opt("cdate", "Date", ShowHide, 0, "Buttons"),
+              // ---- Speed ----
+              Opt("kill", "Free memory when opening an app", OnOff, 0, "Speed"),
               // ---- CPU / RAM / GPU tiles ----
               Opt("stats", "System tiles", ShowHide, 0, "System"),
               Opt("scpu", "CPU tile", ShowHide, 0, "System"),
@@ -1849,6 +2033,18 @@ jobs:
 
           class Store(ctx: Context) {
               private val sp = ctx.getSharedPreferences("cine", Context.MODE_PRIVATE)
+
+              // One-time clean-up of settings that no longer exist / changed defaults (glass mode removed, tiles now blend).
+              fun migrate() {
+                  if (sp.getString("g.ver", "") == "2") return
+                  val a = profiles()
+                  val e = sp.edit()
+                  for (i in 0 until a.length()) {
+                      val id = a.getJSONObject(i).getString("id")
+                      for (k in listOf("tcolor", "topac", "glass", "gtr", "gblur", "gedge", "aurora", "aurstr")) e.remove(id + "." + k)
+                  }
+                  e.putString("g.ver", "2").apply()
+              }
 
               var cur: String
                   get() = sp.getString("cur", "p1") ?: "p1"
@@ -1942,6 +2138,38 @@ jobs:
               android:width="24dp" android:height="24dp"
               android:viewportWidth="24" android:viewportHeight="24">
               <path android:fillColor="#FFFFFFFF" android:pathData="M4,8h4V4H4v4zM10,20h4v-4h-4v4zM4,20h4v-4H4v4zM4,14h4v-4H4v4zM10,14h4v-4h-4v4zM16,4v4h4V4h-4zM10,8h4V4h-4v4zM16,14h4v-4h-4v4zM16,20h4v-4h-4v4z" />
+          </vector>
+          CINE_EOF
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/ic_btn_hdmi.xml <<'CINE_EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="24dp" android:height="24dp"
+              android:viewportWidth="24" android:viewportHeight="24">
+              <path android:fillColor="#FFFFFFFF" android:pathData="M18,7V4c0,-1.1 -0.9,-2 -2,-2H8C6.9,2 6,2.9 6,4v3H5v6l3,6v3h8v-3l3,-6V7h-1zM8,4h8v3h-2V5h-1v2h-2V5h-1v2H8V4z" />
+          </vector>
+          CINE_EOF
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/ic_btn_input.xml <<'CINE_EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="24dp" android:height="24dp"
+              android:viewportWidth="24" android:viewportHeight="24">
+              <path android:fillColor="#FFFFFFFF" android:pathData="M21,3.01H3c-1.1,0 -2,0.9 -2,2V9h2V4.99h18v14.03H3V15H1v4.01c0,1.1 0.9,1.99 2,1.99h18c1.1,0 2,-0.89 2,-1.99v-14c0,-1.11 -0.9,-2 -2,-2zM11,16l4,-4 -4,-4v3H1v2h10v3z" />
+          </vector>
+          CINE_EOF
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/ic_btn_settings.xml <<'CINE_EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="24dp" android:height="24dp"
+              android:viewportWidth="24" android:viewportHeight="24">
+              <path android:fillColor="#FFFFFFFF" android:pathData="M19.14,12.94c0.04,-0.3 0.06,-0.61 0.06,-0.94c0,-0.32 -0.02,-0.64 -0.07,-0.94l2.03,-1.58c0.18,-0.14 0.23,-0.41 0.12,-0.61l-1.92,-3.32c-0.12,-0.22 -0.37,-0.29 -0.59,-0.22l-2.39,0.96c-0.5,-0.38 -1.03,-0.7 -1.62,-0.94L14.4,2.81c-0.04,-0.24 -0.24,-0.41 -0.48,-0.41h-3.84c-0.24,0 -0.43,0.17 -0.47,0.41L9.25,5.35C8.66,5.59 8.12,5.92 7.63,6.29L5.24,5.33c-0.22,-0.08 -0.47,0 -0.59,0.22L2.74,8.87C2.62,9.08 2.66,9.34 2.86,9.48l2.03,1.58C4.84,11.36 4.8,11.69 4.8,12s0.02,0.64 0.07,0.94l-2.03,1.58c-0.18,0.14 -0.23,0.41 -0.12,0.61l1.92,3.32c0.12,0.22 0.37,0.29 0.59,0.22l2.39,-0.96c0.5,0.38 1.03,0.7 1.62,0.94l0.36,2.54c0.05,0.24 0.24,0.41 0.48,0.41h3.84c0.24,0 0.44,-0.17 0.47,-0.41l0.36,-2.54c0.59,-0.24 1.13,-0.56 1.62,-0.94l2.39,0.96c0.22,0.08 0.47,0 0.59,-0.22l1.92,-3.32c0.12,-0.22 0.07,-0.47 -0.12,-0.61L19.14,12.94zM12,15.6c-1.98,0 -3.6,-1.62 -3.6,-3.6s1.62,-3.6 3.6,-3.6s3.6,1.62 3.6,3.6S13.98,15.6 12,15.6z" />
+          </vector>
+          CINE_EOF
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/ic_add.xml <<'CINE_EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="48dp" android:height="48dp"
+              android:viewportWidth="24" android:viewportHeight="24">
+              <path android:fillColor="#FFFFFFFF" android:pathData="M19,13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z" />
           </vector>
           CINE_EOF
           mkdir -p app/src/main/res/drawable
